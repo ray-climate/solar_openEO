@@ -49,7 +49,8 @@ def assign_clusters(
         _scene_quality_image(scene, idx, clusters, clear_thresh)
         for idx, scene in enumerate(candidate_list)
     ]
-    winner = ee.ImageCollection(quality_layers).qualityMosaic("score")
+    # Reverse so best-ranked scene (index 0) is last → wins ties in qualityMosaic.
+    winner = ee.ImageCollection(quality_layers[::-1]).qualityMosaic("score")
 
     assigned_mask = winner.select("score").mask().unmask(0).gt(0)
     source_scene_id = winner.select("source_scene_id").unmask(-1).toInt16()
@@ -105,7 +106,7 @@ def _best_available_pixel_assignment(
                 ]
             )
         )
-    return ee.ImageCollection(layers).qualityMosaic("score")
+    return ee.ImageCollection(layers[::-1]).qualityMosaic("score")
 
 
 def hierarchical_split_and_assign(
@@ -130,7 +131,7 @@ def hierarchical_split_and_assign(
             _scene_quality_image(scene, idx, labels, clear_thresh)
             for idx, scene in enumerate(candidate_list)
         ]
-        winner = ee.ImageCollection(candidates).qualityMosaic("score")
+        winner = ee.ImageCollection(candidates[::-1]).qualityMosaic("score")
         winner_mask = winner.select("score").mask().unmask(0).gt(0)
 
         can_fill = current_unassigned.And(winner_mask)

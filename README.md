@@ -7,6 +7,47 @@ Temporal mosaicing and solar panel ML data prep on Sentinel-2.
 - Running memory: `PROJECT_LOG.md`
 - Technical method: `docs/temporal_mosaic_v1.md`
 
+## Stage-1: Positive sample extraction
+- Code: `extraction_pipeline/`
+- Scripts: `scripts/01_*.py` → `scripts/05_*.py`
+- Input: `data/solar_panels_buffered_v4_10_dissolved_with_year_predicted.gpkg`
+- Output: `outputs/stage1/stage1_positives.h5`
+- GEE Drive folder: `solar_openEO_stage1_mosaics`
+
+### Run order (geospatial env)
+```bash
+# Step 1: sample polygons + build chip/tile manifests (no GEE needed)
+conda run -n geospatial python scripts/01_sample_and_tile.py
+
+# Step 2: submit GEE exports — test with 1 tile first
+conda run -n geospatial python scripts/02_launch_gee_exports.py --batch-size 1
+# then submit the rest in batches
+conda run -n geospatial python scripts/02_launch_gee_exports.py --batch-size 50
+
+# Step 3: monitor GEE job status
+conda run -n geospatial python scripts/03_check_export_status.py
+
+# Step 4: download mosaics from Google Drive → outputs/stage1/mosaics/
+# then extract chips (works for whichever tiles are already downloaded)
+conda run -n geospatial python scripts/04_extract_chips.py
+
+# Step 5: package chips into HDF5
+conda run -n geospatial python scripts/05_package_dataset.py
+```
+
+### Key outputs
+```
+outputs/stage1/
+├── sample_5k.gpkg          5K sampled polygons (geographically stratified)
+├── chip_manifest.csv       polygon → chip grid assignment
+├── unique_chip_manifest.csv unique chips to export (~5725 chips for 5K polygons)
+├── export_jobs.csv         GEE task IDs + status
+├── mosaics/                downloaded GeoTIFFs (one per chip, 256×256 px)
+├── chips/                  extracted 256×256 chips (_image.tif + _mask.tif)
+├── chip_metadata.csv       per-chip stats (panel_frac, coverage_ok, continent)
+└── stage1_positives.h5     final dataset: images(N,13,256,256) + masks(N,256,256)
+```
+
 ## Temporal mosaic v1
 - Code: `mosaic_module/`
 - Main entrypoint: `mosaic_module.create_temporal_mosaic(...)`

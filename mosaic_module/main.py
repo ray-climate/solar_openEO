@@ -103,25 +103,45 @@ def create_temporal_mosaic(
     export_name: Optional[str] = None,
     max_scene_cloud_pct: int | None = None,
     use_shadow_mask: bool = False,
+    drive_folder: Optional[str] = None,
+    export_rgb: bool = True,
+    aoi_bounds_3857: tuple | None = None,
 ) -> Dict[str, object]:
     """Create and export a temporal Sentinel-2 L1C mosaic.
 
     Outputs:
     - 13 spectral L1C bands at 10 m
     - ``source_scene_id`` and ``source_date`` QA bands
+
+    Parameters
+    ----------
+    aoi_bounds_3857:
+        Optional (xmin, ymin, xmax, ymax) in EPSG:3857.  When provided the AOI
+        is built directly from these bounds, guaranteeing pixel-grid alignment
+        and exact output dimensions.  Takes precedence over center_lat/lon +
+        aoi_size_km.
     """
     _validate_dates(start_date, end_date)
-    if aoi_size_km <= 0:
-        raise ValueError("aoi_size_km must be > 0.")
 
     initialize_ee()
 
-    LOGGER.info("Building AOI around (%s, %s).", center_lat, center_lon)
-    aoi = create_aoi(
-        center_lat=center_lat,
-        center_lon=center_lon,
-        half_size_km=aoi_size_km / 2.0,
-    )
+    if aoi_bounds_3857 is not None:
+        xmin, ymin, xmax, ymax = aoi_bounds_3857
+        aoi = ee.Geometry.Rectangle(
+            [xmin, ymin, xmax, ymax],
+            proj=ee.Projection("EPSG:3857"),
+            evenOdd=False,
+        )
+        LOGGER.info("Using exact chip bounds AOI: %s", aoi_bounds_3857)
+    else:
+        if aoi_size_km <= 0:
+            raise ValueError("aoi_size_km must be > 0.")
+        LOGGER.info("Building AOI around (%s, %s).", center_lat, center_lon)
+        aoi = create_aoi(
+            center_lat=center_lat,
+            center_lon=center_lon,
+            half_size_km=aoi_size_km / 2.0,
+        )
 
     LOGGER.info("Loading Sentinel-2 L1C and cloud probability collections.")
     s2 = load_sentinel_l1c(
@@ -238,43 +258,36 @@ def create_temporal_mosaic(
         start_date=start_date,
         end_date=end_date,
     )
+    _drive_folder = drive_folder if drive_folder is not None else DEFAULT_DRIVE_FOLDER
+
+    # When exact bounds are provided, pin the export to the chip pixel grid so
+    # the output is always exactly (xmax-xmin)/scale × (ymax-ymin)/scale pixels.
+    _crs_transform, _dimensions = None, None
+    if aoi_bounds_3857 is not None:
+        xmin, ymin, xmax, ymax = aoi_bounds_3857
+        _crs_transform = [out_scale, 0, xmin, 0, -out_scale, ymax]
+        w = round((xmax - xmin) / out_scale)
+        h = round((ymax - ymin) / out_scale)
+        _dimensions = f"{w}x{h}"
+
     task = export_composite(
         image=output,
         aoi=aoi,
         export_target=export_target,
         export_name=final_export_name,
         scale=out_scale,
-        drive_folder=DEFAULT_DRIVE_FOLDER,
+        drive_folder=_drive_folder,
         crs="EPSG:3857",
+        crs_transform=_crs_transform,
+        dimensions=_dimensions,
     )
-    rgb_vis = (
-        spectral.select(["B4", "B3", "B2"])
-        .unitScale(0, 3000)
-        .clamp(0, 1)
-        .multiply(255)
-        .toUint8()
-    )
-    rgb_task = export_composite(
-        image=rgb_vis,
-        aoi=aoi,
-        export_target=export_target,
-        export_name=f"{final_export_name}_rgb",
-        scale=out_scale,
-        drive_folder=DEFAULT_DRIVE_FOLDER,
-        crs="EPSG:3857",
-    )
-
     task_status = task.status()
-    rgb_task_status = rgb_task.status()
-    return {
+    result = {
         "task": task,
         "task_id": task_status.get("id"),
         "task_state": task_status.get("state"),
-        "rgb_task": rgb_task,
-        "rgb_task_id": rgb_task_status.get("id"),
-        "rgb_task_state": rgb_task_status.get("state"),
         "export_name": final_export_name,
-        "drive_folder": DEFAULT_DRIVE_FOLDER,
+        "drive_folder": _drive_folder,
         "candidate_scene_count": n,
         "rescue_scene_count": rescue_count,
         "aoi_size_km": aoi_size_km,
@@ -282,3 +295,29 @@ def create_temporal_mosaic(
         "use_shadow_mask": use_shadow_mask,
         "aoi": aoi,
     }
+
+    if export_rgb:
+        rgb_vis = (
+            spectral.select(["B4", "B3", "B2"])
+            .unitScale(0, 3000)
+            .clamp(0, 1)
+            .multiply(255)
+            .toUint8()
+        )
+        rgb_task = export_composite(
+            image=rgb_vis,
+            aoi=aoi,
+            export_target=export_target,
+            export_name=f"{final_export_name}_rgb",
+            scale=out_scale,
+            drive_folder=_drive_folder,
+            crs="EPSG:3857",
+        )
+        rgb_task_status = rgb_task.status()
+        result.update({
+            "rgb_task": rgb_task,
+            "rgb_task_id": rgb_task_status.get("id"),
+            "rgb_task_state": rgb_task_status.get("state"),
+        })
+
+    return result

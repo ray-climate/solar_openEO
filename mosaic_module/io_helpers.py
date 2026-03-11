@@ -55,6 +55,8 @@ def export_composite(
     scale: int,
     drive_folder: str = DEFAULT_DRIVE_FOLDER,
     crs: str = "EPSG:3857",
+    crs_transform: list | None = None,
+    dimensions: str | None = None,
 ) -> ee.batch.Task:
     """Start an export task for a composite image.
 
@@ -69,9 +71,16 @@ def export_composite(
     export_name:
         Task description and file prefix.
     scale:
-        Pixel size in meters.
+        Pixel size in meters. Ignored when crs_transform is provided.
     drive_folder:
         Google Drive folder name for exports.
+    crs_transform:
+        Optional affine transform [xScale, xSkew, xOrigin, ySkew, yScale, yOrigin]
+        pinning the export to an exact pixel grid. Use this with chip bounds to
+        guarantee exactly NxN pixels and avoid off-by-one resampling.
+    dimensions:
+        Optional output dimensions string e.g. ``"256x256"``. Used together
+        with crs_transform to lock the pixel count.
     """
     target = export_target.lower().strip()
     safe_name = sanitize_export_name(export_name)
@@ -81,17 +90,24 @@ def export_composite(
             "v1 currently supports export_target='drive' only."
         )
 
-    task = ee.batch.Export.image.toDrive(
+    kwargs = dict(
         image=image,
         description=safe_name,
         folder=drive_folder,
         fileNamePrefix=safe_name,
         region=aoi,
-        scale=scale,
         crs=crs,
         fileFormat="GeoTIFF",
         maxPixels=1e13,
     )
+    if crs_transform is not None:
+        kwargs["crsTransform"] = crs_transform
+        if dimensions is not None:
+            kwargs["dimensions"] = dimensions
+    else:
+        kwargs["scale"] = scale
+
+    task = ee.batch.Export.image.toDrive(**kwargs)
     task.start()
     LOGGER.info(
         "Started Drive export task: %s (folder=%s)", safe_name, drive_folder

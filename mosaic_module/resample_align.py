@@ -30,7 +30,6 @@ def align_l1c_bands(
     """Upsample and align all 13 L1C spectral bands to a common grid."""
     return (
         img.select(S2_L1C_13_BANDS)
-        .resample("bilinear")
         .clip(aoi)
         .reproject(crs=out_crs, scale=out_scale)
         .rename(S2_L1C_13_BANDS)

@@ -4,7 +4,7 @@
 This document describes version-1 of the temporal mosaicing pipeline implemented in `mosaic_module`.
 
 ## High-level flow
-1. Build a true planar 10x10 km AOI around a given center point in `EPSG:3857`.
+1. Build a true planar AOI in `EPSG:3857` from either center point + size or exact projected bounds.
 2. Load Sentinel-2 L1C scenes (`COPERNICUS/S2_HARMONIZED`) for the date range.
 3. Join s2cloudless (`COPERNICUS/S2_CLOUD_PROBABILITY`) by `system:index`.
 4. Compute cloud/shadow masks and a `clear_mask`.
@@ -16,9 +16,10 @@ This document describes version-1 of the temporal mosaicing pipeline implemented
 10. Stitch assigned scenes into one 13-band composite.
 11. Run rescue fill on remaining gaps using lowest `cloud_prob` pixels from top rescue scenes.
 12. Feather boundaries and add QA/source bands.
-13. Export to Google Drive folder `solar_openEO_temporal_mosaics`:
+13. Export to Google Drive:
    - full mosaic (13 bands + QA/source layers)
-   - RGB visualization file (`B4,B3,B2`) scaled to 8-bit
+   - optional RGB visualization file (`B4,B3,B2`) scaled to 8-bit
+   - when exact bounds are provided, pin export with `crsTransform` + `dimensions` for exact pixel-grid alignment
 
 ## Output bands
 - 13 L1C spectral bands: `B1,B2,B3,B4,B5,B6,B7,B8,B8A,B9,B10,B11,B12`
@@ -63,8 +64,16 @@ result = create_temporal_mosaic(
     export_name="s2_mosaic_london_v1",
     max_scene_cloud_pct=None,
     use_shadow_mask=False,
+    drive_folder="solar_openEO_temporal_mosaics",
+    export_rgb=True,
+    aoi_bounds_3857=None,
 )
 ```
+
+Notes:
+- `drive_folder` overrides the default Drive destination.
+- `export_rgb=False` is used by the Stage-1 chip pipeline to export only the 13-band product.
+- `aoi_bounds_3857=(xmin, ymin, xmax, ymax)` forces exact projected chip bounds and exact output dimensions.
 
 ## Diagnostics plot
 Use `create_mosaic_diagnostic_plot(...)` (or `scripts/plot_mosaic_diagnostics.py`) to generate
@@ -79,6 +88,9 @@ The production export still uses the full SNIC + hierarchical assignment pipelin
 
 ## Notes / limitations in v1
 - `export_target` currently supports `drive` only.
+- Scene scoring divides clear-pixel sum by total AOI pixels, so partial-coverage scenes are penalized instead of scoring as fully clear.
+- `clear_mask` is restricted to the real Sentinel-2 scene footprint (`B4 > 0`) to avoid treating out-of-swath zero-fill as valid clear data.
+- SNIC reference and cluster outputs are explicitly reprojected to EPSG:3857 at 10 m so segmentation and connected-components run at the intended scale.
 - Hierarchical fallback uses regular projected grids (coarse-to-fine), not recursive SNIC splitting.
 - Feathering is a light boundary smoothing approximation.
 - For very cloudy windows, remaining gaps are filled from clear-masked temporal median.

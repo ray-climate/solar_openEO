@@ -134,7 +134,11 @@ def compute_clear_mask(
         shadow_mask = ee.Image.constant(0).rename("shadow_mask").toUint8()
 
     cloud_shadow = cloud_mask.Or(shadow_mask).rename("cloud_shadow_mask")
-    clear_mask = cloud_shadow.Not().rename("clear_mask")
+    # Restrict clear_mask to pixels where the S2 scene actually has data.
+    # S2 tiles fill out-of-swath pixels with value 0 rather than masking them,
+    # so we use B4 > 0 (not .mask()) to detect the real scene footprint.
+    scene_data_mask = img.select("B4").gt(0)
+    clear_mask = cloud_shadow.Not().updateMask(scene_data_mask).rename("clear_mask")
 
     return img.addBands(
         [
