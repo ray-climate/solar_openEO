@@ -1,0 +1,44 @@
+experiment:
+  name: exp_stage1_base
+
+data:
+  h5_path: outputs/stage1/stage1_positives.h5
+  manifest_path: outputs/training_prep/stage1_v3/split_manifest.csv
+  stats_path: outputs/training_prep/stage1_v3/band_stats.npz
+  normalization: percentile
+  augment: true
+
+model:
+  backbone: resnet50
+  pretrained: true
+  decoder_filters: [256, 128, 96, 64, 32]
+  decoder_dropout: 0.1
+
+training:
+  output_root: experiments
+  epochs: 60
+  batch_size: 16
+  input_backend: tfdata
+  in_memory_image_dtype: float16
+  learning_rate: 0.0003
+  min_learning_rate: 0.000001
+  warmup_epochs: 5
+  weight_decay: 0.0001
+  lr_schedule: cosine
+  loss_name: focal_dice
+  bce_weight: 1.0
+  dice_weight: 2.0
+  focal_weight: 0.5
+  early_stopping_patience: 12
+  lr_patience: 4
+  freeze_backbone_epochs: 0
+  use_mixed_precision: true
+  steps_per_execution: 16
+  loader_workers: 4
+  loader_use_multiprocessing: false
+  loader_max_queue_size: 16
+  drop_remainder: true
+  shuffle_buffer: 2048
+  tfdata_num_parallel_calls: 8
+  tfdata_prefetch_buffer: 4
+  seed: 42

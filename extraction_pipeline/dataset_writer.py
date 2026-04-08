@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import h5py
@@ -22,6 +23,8 @@ from rasterio.transform import from_bounds
 from . import config as cfg
 
 LOGGER = logging.getLogger(__name__)
+
+_CHIP_ID_RE = re.compile(r"^(c[+-]\d+_r[+-]\d+)_image$")
 
 # Hardcoded WKT for EPSG:3857 — avoids PROJ database lookup at write time.
 _CRS_3857 = rasterio.CRS.from_wkt(
@@ -226,3 +229,58 @@ def _print_dataset_summary(chip_metadata: pd.DataFrame, masks: np.ndarray) -> No
         for cont, cnt in chip_metadata["continent"].value_counts().items():
             print(f"    {cont:15s}: {cnt}")
     print()
+
+
+def parse_chip_id_str(chip_id_str: str) -> tuple[int, int]:
+    """Parse ``c+000123_r-000456`` into ``(chip_col, chip_row)``."""
+    col_str, row_str = chip_id_str.split("_")
+    return int(col_str[1:]), int(row_str[1:])
+
+
+def build_chip_metadata_from_chip_dir(chips_dir: str | Path) -> pd.DataFrame:
+    """Build minimal chip metadata by scanning ``*_image.tif``/``*_mask.tif`` pairs.
+
+    This is a recovery path for cases where extracted chips exist but
+    ``chip_metadata.csv`` is missing.
+    """
+    chips_dir = Path(chips_dir)
+    records: list[dict] = []
+
+    image_files = sorted(chips_dir.glob("*_image.tif"))
+    for image_path in image_files:
+        match = _CHIP_ID_RE.match(image_path.stem)
+        if not match:
+            continue
+
+        chip_id_str = match.group(1)
+        chip_col, chip_row = parse_chip_id_str(chip_id_str)
+        mask_path = chips_dir / f"{chip_id_str}_mask.tif"
+        coverage_ok = mask_path.exists()
+        n_panel_px = 0
+        panel_frac = 0.0
+
+        if coverage_ok:
+            with rasterio.open(mask_path) as src:
+                mask = src.read(1).astype(np.uint8)
+            n_panel_px = int(mask.sum())
+            panel_frac = round(n_panel_px / (cfg.CHIP_SIZE_PX ** 2), 6)
+
+        records.append({
+            "chip_id_str": chip_id_str,
+            "chip_col": chip_col,
+            "chip_row": chip_row,
+            "n_panel_px": n_panel_px,
+            "panel_frac": panel_frac,
+            "coverage_ok": coverage_ok,
+            "continent": "",
+        })
+
+    if not records:
+        return pd.DataFrame(columns=[
+            "chip_id_str", "chip_col", "chip_row", "n_panel_px",
+            "panel_frac", "coverage_ok", "continent",
+        ])
+
+    df = pd.DataFrame(records).sort_values("chip_id_str").reset_index(drop=True)
+    LOGGER.info("Scanned %d extracted chips from %s", len(df), chips_dir)
+    return df

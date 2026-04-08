@@ -3,4 +3,7 @@ data/
 
 __pycache__/
 *.pyc
+*.pyo
 outputs/
+experiments/
+slurm_logs/

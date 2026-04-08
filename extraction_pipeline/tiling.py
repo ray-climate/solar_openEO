@@ -20,7 +20,6 @@ import logging
 import math
 from pathlib import Path
 
-import geopandas as gpd
 import pandas as pd
 import pyproj
 from shapely.geometry import box
@@ -91,7 +90,7 @@ def polygon_to_chip_ids(geom) -> list[tuple[int, int]]:
 # Manifest builders
 # ---------------------------------------------------------------------------
 
-def build_chip_manifest(sample_gdf: gpd.GeoDataFrame) -> pd.DataFrame:
+def build_chip_manifest(sample_gdf) -> pd.DataFrame:
     """Assign each polygon to all chip cells it intersects.
 
     Returns a DataFrame with one row per (polygon, chip) pair.

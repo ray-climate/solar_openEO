@@ -77,7 +77,8 @@ MOSAIC_PARAMS: dict = dict(
 # ---------------------------------------------------------------------------
 # GEE export
 # ---------------------------------------------------------------------------
-DRIVE_FOLDER = "solar_openEO_stage1_mosaics"
+DRIVE_FOLDER = "solar_openEO_stage1_v3"
+RCLONE_REMOTE = "google"
 
 # ---------------------------------------------------------------------------
 # Spectral bands to extract  (all 13 L1C bands)

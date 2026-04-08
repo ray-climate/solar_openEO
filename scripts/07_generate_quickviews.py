@@ -154,7 +154,12 @@ def download_mosaics_from_drive(
         LOGGER.info("All completed mosaics already on disk.")
         return 0
 
-    LOGGER.info("Downloading %d mosaics from Drive folder '%s' ...", len(to_download), drive_folder)
+    LOGGER.info(
+        "Downloading %d mosaics from Drive remote '%s' folder '%s' ...",
+        len(to_download),
+        cfg.RCLONE_REMOTE,
+        drive_folder,
+    )
 
     # Use rclone copy with include filters for efficiency
     # Build a filter file with all needed filenames
@@ -166,7 +171,7 @@ def download_mosaics_from_drive(
 
     cmd = [
         "rclone", "copy",
-        f"rui.song90:{drive_folder}",
+        f"{cfg.RCLONE_REMOTE}:{drive_folder}",
         str(mosaics_dir),
         "--filter-from", str(filter_path),
         "--transfers", "8",

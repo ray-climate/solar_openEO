@@ -37,27 +37,42 @@ _JOBS_COLS = [
 # Naming
 # ---------------------------------------------------------------------------
 
-def chip_to_export_name(chip_id_str: str) -> str:
+def chip_to_export_name(chip_id_str: str, name_prefix: str = "stage1") -> str:
     """Deterministic GEE export name for a chip.
 
-    Example: ``stage1_cp0002504_rm0000213``
+    Example: ``stage1_cp0002504_rm0000213`` (positives)
+             ``neg_cp0002504_rm0000213``    (negatives)
     Using the chip_id_str keeps it unique and traceable to the manifest.
     """
     # Replace + and - with p and m so the name is GEE-safe (alphanumeric + _ -)
     safe = chip_id_str.replace("+", "p").replace("-", "m")
-    return f"stage1_{safe}"
+    return f"{name_prefix}_{safe}"
 
 
 # ---------------------------------------------------------------------------
 # Single-tile submit
 # ---------------------------------------------------------------------------
 
-def submit_chip_export(chip_row: pd.Series) -> dict:
+def submit_chip_export(
+    chip_row: pd.Series,
+    drive_folder: str | None = None,
+    name_prefix: str = "stage1",
+) -> dict:
     """Submit a GEE export for one chip row from the unique chip manifest.
 
     Passes exact chip grid bounds to ``create_temporal_mosaic`` so GEE exports
     a pixel-grid-aligned GeoTIFF at exactly CHIP_SIZE_PX × CHIP_SIZE_PX pixels,
     avoiding off-by-one resampling blur.
+
+    Parameters
+    ----------
+    drive_folder:
+        Google Drive folder for the export.  Defaults to ``cfg.DRIVE_FOLDER``
+        when ``None``.  Pass an explicit value to export negatives or other
+        datasets to a separate folder.
+    name_prefix:
+        Prefix for the GEE export task name, e.g. ``"stage1"`` for positives
+        or ``"neg"`` for negatives.
 
     Returns a dict with job metadata.
     """
@@ -67,8 +82,8 @@ def submit_chip_export(chip_row: pd.Series) -> dict:
         center_lon=float(chip_row["chip_center_lon"]),
         start_date=cfg.START_DATE,
         end_date=cfg.END_DATE,
-        export_name=chip_to_export_name(chip_row["chip_id_str"]),
-        drive_folder=cfg.DRIVE_FOLDER,
+        export_name=chip_to_export_name(chip_row["chip_id_str"], name_prefix=name_prefix),
+        drive_folder=drive_folder if drive_folder is not None else cfg.DRIVE_FOLDER,
         export_rgb=False,   # RGB is generated locally from the 13-band chip
         aoi_bounds_3857=bounds,
         **cfg.MOSAIC_PARAMS,
@@ -96,6 +111,8 @@ def submit_all_exports(
     batch_size: int = 50,
     chip_ids: list[str] | None = None,
     retry_errors: bool = False,
+    drive_folder: str | None = None,
+    name_prefix: str = "stage1",
 ) -> pd.DataFrame:
     """Submit GEE exports for chips not yet in jobs_csv.
 
@@ -153,7 +170,7 @@ def submit_all_exports(
     for _, row in pending.iterrows():
         LOGGER.info("Submitting chip %s ...", row["chip_id_str"])
         try:
-            job = submit_chip_export(row)
+            job = submit_chip_export(row, drive_folder=drive_folder, name_prefix=name_prefix)
             new_jobs.append(job)
             LOGGER.info(
                 "  → task_id=%s  state=%s", job["gee_task_id"], job["gee_task_state"]
@@ -164,7 +181,7 @@ def submit_all_exports(
                 "chip_id_str": row["chip_id_str"],
                 "gee_task_id": "",
                 "gee_task_state": "SUBMIT_ERROR",
-                "export_name": chip_to_export_name(row["chip_id_str"]),
+                "export_name": chip_to_export_name(row["chip_id_str"], name_prefix=name_prefix),
                 "chip_center_lat": row["chip_center_lat"],
                 "chip_center_lon": row["chip_center_lon"],
                 "status": "SUBMIT_ERROR",

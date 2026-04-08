@@ -24,6 +24,8 @@ Usage:
       --chip-ids c+0002504_r+0001234 c+0002505_r+0001234
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -52,6 +54,18 @@ def parse_args() -> argparse.Namespace:
                    help="Submit only these chip_id_str values.")
     p.add_argument("--retry-errors", action="store_true",
                    help="Re-submit chips that previously failed with SUBMIT_ERROR.")
+    p.add_argument("--manifest", default=str(cfg.UNIQUE_CHIP_MANIFEST_CSV),
+                   help="Unique chip manifest CSV to export "
+                        "(default: unique_chip_manifest.csv).")
+    p.add_argument("--drive-folder", default=None,
+                   help="Google Drive folder for GEE exports "
+                        "(default: from config, i.e. solar_openEO_stage1_v3).")
+    p.add_argument("--jobs-csv", default=str(cfg.EXPORT_JOBS_CSV),
+                   help="Export jobs tracking CSV — keeps positive and negative "
+                        "runs separate (default: export_jobs.csv).")
+    p.add_argument("--name-prefix", default="stage1",
+                   help="Prefix for GEE export task names, e.g. 'stage1' for positives "
+                        "or 'neg' for negatives (default: stage1).")
     return p.parse_args()
 
 
@@ -85,13 +99,17 @@ def diverse_sample(manifest: pd.DataFrame, n: int) -> list[str]:
 def main() -> None:
     args = parse_args()
 
-    if not cfg.UNIQUE_CHIP_MANIFEST_CSV.exists():
-        LOGGER.error("Unique chip manifest not found: %s", cfg.UNIQUE_CHIP_MANIFEST_CSV)
-        LOGGER.error("Run scripts/01_sample_and_tile.py first.")
+    manifest_path = Path(args.manifest)
+    if not manifest_path.exists():
+        LOGGER.error("Unique chip manifest not found: %s", manifest_path)
+        LOGGER.error(
+            "For positives run scripts/01_sample_and_tile.py first; "
+            "for negatives run scripts/00_sample_negatives.py first."
+        )
         sys.exit(1)
 
-    unique_chip_manifest = pd.read_csv(cfg.UNIQUE_CHIP_MANIFEST_CSV)
-    LOGGER.info("Loaded unique chip manifest: %d chips", len(unique_chip_manifest))
+    unique_chip_manifest = pd.read_csv(manifest_path)
+    LOGGER.info("Loaded unique chip manifest: %d chips  (%s)", len(unique_chip_manifest), manifest_path)
 
     # Resolve chip_ids
     chip_ids = args.chip_ids
@@ -99,20 +117,23 @@ def main() -> None:
         chip_ids = diverse_sample(unique_chip_manifest, args.test_n)
         LOGGER.info("Test mode: submitting %d diverse chips", len(chip_ids))
 
+    jobs_csv = Path(args.jobs_csv)
     jobs = submit_all_exports(
         unique_chip_manifest=unique_chip_manifest,
-        jobs_csv_path=cfg.EXPORT_JOBS_CSV,
+        jobs_csv_path=jobs_csv,
         dry_run=args.dry_run,
         batch_size=args.batch_size,
         chip_ids=chip_ids,
         retry_errors=args.retry_errors,
+        drive_folder=args.drive_folder,
+        name_prefix=args.name_prefix,
     )
 
-    if not args.dry_run and cfg.EXPORT_JOBS_CSV.exists():
-        print_status_summary(cfg.EXPORT_JOBS_CSV)
+    effective_folder = args.drive_folder or cfg.DRIVE_FOLDER
+    if not args.dry_run and jobs_csv.exists():
+        print_status_summary(jobs_csv)
         print("Next: monitor with  scripts/03_check_export_status.py")
-        print(f"      then download mosaics from Google Drive '{cfg.DRIVE_FOLDER}'")
-        print(f"      → place .tif files in {cfg.MOSAICS_DIR}")
+        print(f"      then download mosaics from Google Drive '{effective_folder}'")
 
 
 if __name__ == "__main__":
