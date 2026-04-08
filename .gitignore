@@ -7,3 +7,11 @@ __pycache__/
 outputs/
 experiments/
 slurm_logs/
+
+# Test artifacts (large .nc stacks, generated figures)
+openeo_udp/tests/test_outputs/
+openeo_udp/tests/detection_batch_outputs/
+openeo_udp/tests/mosaic_visual_outputs/
+
+# Packaged release weights (use GitHub Releases instead)
+openeo_udp/export/releases/

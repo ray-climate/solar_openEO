@@ -1,0 +1,68 @@
+# Solar PV Detection — Model Registry
+#
+# This file is the ONLY file that needs updating when a new model version
+# is trained.  The OpenEO UDP and UDF code read from this registry at
+# runtime and never hardcode model-specific parameters.
+#
+# Update workflow:
+#   1. Train new model
+#   2. Run: python openeo_udp/export/export_weights.py --version vX.Y
+#   3. Upload artifacts to GitHub Release (follow printed instructions)
+#   4. Update the URLs and version below
+#   5. git commit + push
+#
+# The UDP on the OpenEO backend will use the new model on next job run.
+
+active_model:
+  # Human-readable model identifier
+  name: r101_dice_zscore_longer_v1
+
+  # Source experiment directory (for provenance tracking)
+  experiment: exp_stage1_r101_dice_zscore_longer
+
+  # Download URLs — update these after running export_weights.py + gh release
+  # TODO: Replace with actual GitHub Release URLs after first upload
+  weights_url: https://github.com/ray-climate/solar_openEO/releases/download/v1.0/best.weights.h5
+  band_stats_url: https://github.com/ray-climate/solar_openEO/releases/download/v1.0/band_stats.npz
+
+  # Local fallback paths (relative to repo root, for development/testing)
+  weights_local: experiments/exp_stage1_r101_dice_zscore_longer/best.weights.h5
+  band_stats_local: outputs/training_prep/stage1_v3/band_stats.npz
+
+  # Architecture parameters (must match the trained model exactly)
+  backbone: resnet101
+  decoder_filters: [256, 128, 96, 64, 32]
+  decoder_dropout: 0.1
+  attention: false
+  se: false
+
+  # Input specification
+  input_shape: [256, 256, 13]
+  bands:
+    - B1    # 0  - Coastal aerosol (60m)
+    - B2    # 1  - Blue (10m)
+    - B3    # 2  - Green (10m)
+    - B4    # 3  - Red (10m)
+    - B5    # 4  - Vegetation Red Edge 1 (20m)
+    - B6    # 5  - Vegetation Red Edge 2 (20m)
+    - B7    # 6  - Vegetation Red Edge 3 (20m)
+    - B8    # 7  - NIR (10m)
+    - B8A   # 8  - Vegetation Red Edge 4 (20m)
+    - B9    # 9  - Water vapour (60m)
+    - B10   # 10 - SWIR Cirrus (60m)
+    - B11   # 11 - SWIR 1 (20m)
+    - B12   # 12 - SWIR 2 (20m)
+
+  # Preprocessing
+  normalization: zscore  # (pixel - mean) / std, per-band
+
+  # Inference
+  threshold: 0.80        # Optimal threshold from test-set sweep (Dice 0.8853)
+
+  # Metadata
+  version: "1.0.0"
+  released: "2026-04-08"
+  test_dice: 0.8853      # At optimal threshold
+  test_iou: 0.7942
+  training_chips: 4922
+  training_loss: dice

@@ -1,0 +1,11 @@
+# Runtime dependencies for the solar PV inference UDF.
+#
+# These must be available in the OpenEO backend's UDF execution environment.
+# Check with backend provider (VITO, EODC, CDSE) for pre-installed packages.
+
+tensorflow>=2.15
+numpy>=1.24
+h5py>=3.8
+pyyaml>=6.0
+requests>=2.28
+xarray>=2023.1
