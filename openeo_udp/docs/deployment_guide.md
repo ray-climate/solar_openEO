@@ -36,7 +36,33 @@ Options for Apex to resolve this:
 1. **Request TF in backend runtime** — ask CDSE/backend provider to add it
 2. **Custom Docker runtime** — build a UDF container image with TF included
 3. **Convert to ONNX** — convert the Keras model to ONNX format for
-   numpy-only inference via `onnxruntime` (lighter, more portable)
+   numpy-only inference via `onnxruntime` (lighter, more portable).
+   This repo now ships an ONNX-based UDF that does **not** require
+   TensorFlow on the backend:
+   - UDF: `openeo_udp/udf/solar_pv_inference_onnx.py`
+   - Process graph builder: `openeo_udp/process_graph/solar_pv_detection_onnx.py`
+   - The model + onnxruntime are passed via `udf-dependency-archives`
+
+ONNX export helper in this repo:
+
+```bash
+python openeo_udp/export/export_onnx.py \
+    --output openeo_udp/export/releases/v1.0/solar_pv.onnx \
+    --validate \
+    --verbose
+```
+
+The script will use `active_model.weights_local` if present, otherwise it
+automatically downloads from `active_model.weights_url`.
+Use `--verbose` to show INFO logs and per-step timings.
+The exporter tries dynamic spatial export first; if Keras tracing fails
+(known `UpSampling2D` symbolic-shape limitation), it auto-falls back to
+fixed spatial export.
+
+Local conversion requirements:
+- `tf2onnx`
+- `onnx`
+- `onnxruntime` (for `--validate`)
 
 The temporal mosaic UDF (`temporal_mosaic.py`) only needs numpy + scipy
 and runs on any backend without modification.
@@ -69,10 +95,10 @@ This confirms:
 - Band stats load and normalisation works
 - Inference produces valid binary masks
 
-### 2. Ensure Model Weights Are Accessible
+### 2. Ensure Model Artifacts Are Accessible
 
-The UDF downloads model weights from a URL at runtime.  Check that the
-URLs in `model_registry.yaml` are accessible from the backend:
+For the TensorFlow UDF path, the UDF downloads model artifacts from URLs
+in `model_registry.yaml`:
 
 ```yaml
 weights_url: https://github.com/ray-climate/solar_openEO/releases/download/v1.0/best.weights.h5
@@ -83,6 +109,17 @@ If the backend cannot reach GitHub (firewall), alternatives:
 - Host on the backend's object storage
 - Bundle weights into a Docker image
 - Pass URLs via `context` dict in `run_udf()`
+
+For the ONNX path, use dependency archives in job options (recommended):
+
+```yaml
+udf-dependency-archives:
+    - https://s3.waw3-1.cloudferro.com/project_dependencies/onnx_deps_python311.zip#onnx_deps
+    - https://s3.waw3-1.cloudferro.com/project_dependencies/apex_pv_rui/solar_pv_rui.zip#onnx_models
+```
+
+The model archive must include both `solar_pv.onnx` and `band_stats.npz`
+(nested folders are supported).
 
 ### 3. Implement the Mosaic Process Graph
 
@@ -124,6 +161,9 @@ result = mosaic.apply_neighborhood(
 Note: `apply_neighborhood` tiles the AOI into 256×256 px chunks and
 passes each to the UDF.  No overlap is needed (the model was trained
 on non-overlapping chips).
+
+Current production recommendation: keep chunk size fixed at `256x256`
+because the latest validated ONNX export used fixed spatial dimensions.
 
 ### 5. Export Process Graph JSON
 
@@ -186,7 +226,7 @@ weights on backend storage.
 **All predictions are zero:**
 - Check band order (most likely cause)
 - Check that input values are in raw L1C DN range (0–10000+)
-- Verify band_stats.npz matches the training data
+- Verify `band_stats.npz` is present in the ONNX model archive and matches the training data
 
 **Low accuracy on new regions:**
 The model was trained on European solar installations.  Performance may
