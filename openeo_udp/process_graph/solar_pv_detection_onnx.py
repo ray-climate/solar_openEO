@@ -32,7 +32,7 @@ Example
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import openeo
@@ -68,6 +68,14 @@ S2_L1C_BANDS = [
 
 UDF_PATH = Path(__file__).resolve().parent.parent / "udf" / "solar_pv_inference_onnx.py"
 
+# Expected output band order from the ONNX UDF.
+UDF_OUTPUT_BANDS = [
+    "solar_pv",
+    "solar_pv_probability",
+    "pre_norm_mean",
+    "post_norm_mean",
+]
+
 
 def _load_l1c_cube(
     connection: openeo.Connection,
@@ -82,6 +90,7 @@ def _load_l1c_cube(
         spatial_extent=spatial_extent,
         temporal_extent=temporal_extent,
         bands=S2_L1C_BANDS,
+        max_cloud_cover =  75
     )
     s2 = s2.resample_spatial(resolution=target_resolution, projection=target_crs)
     return s2
@@ -105,21 +114,70 @@ def _build_temporal_median_mosaic(
         spatial_extent=spatial_extent,
         temporal_extent=temporal_extent,
         bands=["SCL"],
+        max_cloud_cover =  75
     ).resample_spatial(resolution=10, projection="EPSG:3857")
 
-    scl_mask = (
-        (scl.band("SCL") != 0)
-        & (scl.band("SCL") != 1)
-        & (scl.band("SCL") != 3)
-        & (scl.band("SCL") != 8)
-        & (scl.band("SCL") != 9)
-        & (scl.band("SCL") != 10)
+    mask = scl.process(
+        "to_scl_dilation_mask", 
+        data=scl,
+        kernel1_size=17,
+        kernel2_size=77,
+        mask1_values=[2, 4, 5, 6, 7],
+        mask2_values=[3, 8, 9, 10, 11],
+        erosion_kernel_size=3
     )
-    masked = l1c.mask(scl_mask)
+    
+    # Create a cloud-free mosaic
+    masked = l1c.mask(mask)
+
     return masked.reduce_dimension(dimension="t", reducer="median")
 
 
 THRESHOLD = 0.80
+
+
+def _extract_band_vector(result: Any, *, label: str) -> list[float]:
+    """Extract a 13-value band vector from an openEO execute() result."""
+    if isinstance(result, dict):
+        if all(b in result for b in S2_L1C_BANDS):
+            return [float(result[b]) for b in S2_L1C_BANDS]
+        raise ValueError(
+            f"Unsupported {label} result keys: {list(result.keys())}. "
+            f"Expected band keys {S2_L1C_BANDS}."
+        )
+
+    if isinstance(result, (list, tuple)) and len(result) == 13:
+        return [float(v) for v in result]
+
+    raise ValueError(
+        f"Unsupported {label} result type: {type(result)} value={result!r}"
+    )
+
+
+def _compute_global_band_stats_from_mosaic(
+    mosaic: openeo.DataCube,
+) -> tuple[list[float], list[float]]:
+    """Compute ROI-wide per-band mean/std from the same mosaic used for inference."""
+    mean_cube = mosaic.reduce_dimension(dimension="x", reducer="mean").reduce_dimension(
+        dimension="y", reducer="mean"
+    )
+    mean_sq_cube = (mosaic * mosaic).reduce_dimension(
+        dimension="x", reducer="mean"
+    ).reduce_dimension(
+        dimension="y", reducer="mean"
+    )
+
+    mean_raw = mean_cube.execute()
+    mean_sq_raw = mean_sq_cube.execute()
+
+    global_mean = _extract_band_vector(mean_raw, label="global_mean")
+    global_mean_sq = _extract_band_vector(mean_sq_raw, label="global_mean_sq")
+
+    mean_arr = np.asarray(global_mean, dtype=np.float64)
+    mean_sq_arr = np.asarray(global_mean_sq, dtype=np.float64)
+    var_arr = np.maximum(mean_sq_arr - (mean_arr ** 2), 1e-12)
+    global_std = np.sqrt(var_arr).astype(np.float64).tolist()
+    return global_mean, global_std
 
 
 def _gaussian_kernel(size: int, sigma: float) -> list[list[float]]:
@@ -142,6 +200,7 @@ def _smooth_probability_band(
     prob_band: str,
     binary_band: str,
     threshold: float,
+    prob_band_index: int = 1,
     kernel_size: int = 9,
     sigma: float = 2.0,
 ) -> openeo.DataCube:
@@ -155,7 +214,12 @@ def _smooth_probability_band(
     """
     kernel = _gaussian_kernel(kernel_size, sigma)
 
-    prob = cube.band(prob_band).apply_kernel(kernel=kernel)
+    # Use positional selection because some backends/clients keep source
+    # collection metadata (B01..B12) after apply_neighborhood even if the UDF
+    # emits new band labels.
+    prob = cube.band(prob_band_index)
+
+    prob = prob.apply_kernel(kernel=kernel)
     binary = (prob > threshold) * 1.0  # float band, 0.0 / 1.0
 
     # Re-stack as a 2-band cube with the original band names.
@@ -164,6 +228,23 @@ def _smooth_probability_band(
         dimension="bands",
         target=[binary_band, prob_band],
     )
+
+    # Preserve optional diagnostic bands emitted by the UDF.
+    for idx in (2, 3):
+        try:
+            extra = cube.band(idx)
+        except ValueError:
+            continue
+        smoothed = smoothed.merge_cubes(extra)
+
+    try:
+        smoothed = smoothed.rename_labels(
+            dimension="bands",
+            target=UDF_OUTPUT_BANDS,
+        )
+    except ValueError:
+        # If debug bands are absent, keep the 2-band names already assigned.
+        pass
     return smoothed
 
 
@@ -172,6 +253,7 @@ def build_solar_pv_detection_onnx(
     spatial_extent: dict,
     temporal_extent: list[str],
     udf_path: Optional[str] = None,
+    normalization: str = "percentile",
 ) -> openeo.DataCube:
     """Build the full mosaic + ONNX inference cube.
 
@@ -181,27 +263,32 @@ def build_solar_pv_detection_onnx(
     spatial_extent : dict with west/south/east/north[/crs]
     temporal_extent : [start, end] dates (ISO strings)
     udf_path : override the default UDF source path
-
-    Returns
-    -------
-    openeo.DataCube with two bands:
-      - solar_pv (binary mask)
-      - solar_pv_probability (float probability)
+    normalization : "percentile" (default, matches winning training run) or "zscore".
+        Both modes use the band statistics in band_stats.npz from the model archive.
     """
     mosaic = _build_temporal_median_mosaic(connection, spatial_extent, temporal_extent)
+
+    if normalization not in ("percentile", "zscore"):
+        raise ValueError(
+            f"Unknown normalization mode '{normalization}'. "
+            f"Supported: 'percentile', 'zscore'."
+        )
 
     udf_src_path = Path(udf_path) if udf_path else UDF_PATH
     udf_code = udf_src_path.read_text(encoding="utf-8")
 
     # apply_neighborhood feeds the UDF a chunk of shape (size + 2*overlap).
     # Model expects fixed 256x256, so size=192 + 2*32 = 256 ✓.
+    udf_context: dict = {
+        "threshold": THRESHOLD,
+        "normalization": normalization,
+    }
+
     inferred = mosaic.apply_neighborhood(
         process=openeo.UDF(
             udf_code,
             runtime="Python",
-            context={
-                "threshold": THRESHOLD,
-            },
+            context=udf_context,
         ),
         size=[
             {"dimension": "x", "value": 192, "unit": "px"},
@@ -213,16 +300,6 @@ def build_solar_pv_detection_onnx(
         ],
     )
 
-    # Soft Gaussian smoothing on the probability band to suppress residual
-    # tile-edge artifacts and salt-and-pepper noise (pattern from masolele/WAC).
-    # We smooth probabilities (continuous) and re-derive the binary mask from
-    # the smoothed probabilities so both output bands stay consistent.
-    smoothed = _smooth_probability_band(
-        inferred,
-        prob_band="solar_pv_probability",
-        binary_band="solar_pv",
-        threshold=THRESHOLD,
-        kernel_size=9,
-        sigma=2.0,
-    )
-    return smoothed
+    # Debug mode simplification: skip Gaussian smoothing and return direct
+    # UDF output to avoid downstream band-selection complexity.
+    return inferred

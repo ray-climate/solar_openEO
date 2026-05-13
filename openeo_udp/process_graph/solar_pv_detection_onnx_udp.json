@@ -19,6 +19,22 @@
           "B12"
         ],
         "id": "SENTINEL2_L1C",
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte1": {
+                "process_id": "lte",
+                "arguments": {
+                  "x": {
+                    "from_parameter": "value"
+                  },
+                  "y": 75
+                },
+                "result": true
+              }
+            }
+          }
+        },
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
@@ -46,6 +62,22 @@
           "SCL"
         ],
         "id": "SENTINEL2_L2A",
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte2": {
+                "process_id": "lte",
+                "arguments": {
+                  "x": {
+                    "from_parameter": "value"
+                  },
+                  "y": 75
+                },
+                "result": true
+              }
+            }
+          }
+        },
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
@@ -66,181 +98,29 @@
         "resolution": 10
       }
     },
-    "reducedimension1": {
-      "process_id": "reduce_dimension",
+    "toscldilationmask1": {
+      "process_id": "to_scl_dilation_mask",
       "arguments": {
         "data": {
           "from_node": "resamplespatial2"
         },
-        "dimension": "bands",
-        "reducer": {
-          "process_graph": {
-            "arrayelement1": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq1": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement1"
-                },
-                "y": 0
-              }
-            },
-            "arrayelement2": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq2": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement2"
-                },
-                "y": 1
-              }
-            },
-            "and1": {
-              "process_id": "and",
-              "arguments": {
-                "x": {
-                  "from_node": "neq1"
-                },
-                "y": {
-                  "from_node": "neq2"
-                }
-              }
-            },
-            "arrayelement3": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq3": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement3"
-                },
-                "y": 3
-              }
-            },
-            "and2": {
-              "process_id": "and",
-              "arguments": {
-                "x": {
-                  "from_node": "and1"
-                },
-                "y": {
-                  "from_node": "neq3"
-                }
-              }
-            },
-            "arrayelement4": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq4": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement4"
-                },
-                "y": 8
-              }
-            },
-            "and3": {
-              "process_id": "and",
-              "arguments": {
-                "x": {
-                  "from_node": "and2"
-                },
-                "y": {
-                  "from_node": "neq4"
-                }
-              }
-            },
-            "arrayelement5": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq5": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement5"
-                },
-                "y": 9
-              }
-            },
-            "and4": {
-              "process_id": "and",
-              "arguments": {
-                "x": {
-                  "from_node": "and3"
-                },
-                "y": {
-                  "from_node": "neq5"
-                }
-              }
-            },
-            "arrayelement6": {
-              "process_id": "array_element",
-              "arguments": {
-                "data": {
-                  "from_parameter": "data"
-                },
-                "index": 0
-              }
-            },
-            "neq6": {
-              "process_id": "neq",
-              "arguments": {
-                "x": {
-                  "from_node": "arrayelement6"
-                },
-                "y": 10
-              }
-            },
-            "and5": {
-              "process_id": "and",
-              "arguments": {
-                "x": {
-                  "from_node": "and4"
-                },
-                "y": {
-                  "from_node": "neq6"
-                }
-              },
-              "result": true
-            }
-          }
-        }
+        "erosion_kernel_size": 3,
+        "kernel1_size": 17,
+        "kernel2_size": 77,
+        "mask1_values": [
+          2,
+          4,
+          5,
+          6,
+          7
+        ],
+        "mask2_values": [
+          3,
+          8,
+          9,
+          10,
+          11
+        ]
       }
     },
     "mask1": {
@@ -250,11 +130,11 @@
           "from_node": "resamplespatial1"
         },
         "mask": {
-          "from_node": "reducedimension1"
+          "from_node": "toscldilationmask1"
         }
       }
     },
-    "reducedimension2": {
+    "reducedimension1": {
       "process_id": "reduce_dimension",
       "arguments": {
         "data": {
@@ -280,17 +160,17 @@
       "process_id": "apply_neighborhood",
       "arguments": {
         "data": {
-          "from_node": "reducedimension2"
+          "from_node": "reducedimension1"
         },
         "overlap": [
           {
             "dimension": "x",
-            "value": 0,
+            "value": 32,
             "unit": "px"
           },
           {
             "dimension": "y",
-            "value": 0,
+            "value": 32,
             "unit": "px"
           }
         ],
@@ -300,13 +180,14 @@
               "process_id": "run_udf",
               "arguments": {
                 "context": {
-                  "threshold": 0.8
+                  "threshold": 0.8,
+                  "normalization": "percentile"
                 },
                 "data": {
                   "from_parameter": "data"
                 },
                 "runtime": "Python",
-                "udf": "\"\"\"OpenEO UDF: Solar PV detection using ONNX runtime.\n\nThis UDF runs binary segmentation of solar PV panels on a 13-band\nSentinel-2 L1C composite (cloud-free temporal mosaic).\n\nIt is designed to be invoked via ``apply_neighborhood`` on 256x256\nspatial chunks because the underlying U-Net segmentation model has a\nfixed spatial input size (256, 256, 13).\n\nModel and ONNX runtime are expected to be supplied as UDF dependency\narchives via ``udf-dependency-archives`` job options:\n\n    udf-dependency-archives:\n        - <onnx_runtime_archive>.zip#onnx_deps\n        - <model_archive>.zip#onnx_models\n\nThe archives expose:\n    onnx_deps/      -> onnxruntime python package\n    onnx_models/    -> solar_pv.onnx + band_stats.npz\n\n``band_stats.npz`` is required (no fallback in production).\n\nDefault model archive URL (zipped model bundle):\n\n    https://s3.waw3-1.cloudferro.com/project_dependencies/apex_pv_rui/solar_pv_rui.zip\n\nOutput: a two-band cube with bands:\n    - solar_pv               (uint8, 0/1, probability > threshold)\n    - solar_pv_probability   (float32, sigmoid output in [0, 1])\n\nThreshold can be overridden via the UDF ``context`` dict::\n\n    context = {\n        \"threshold\": 0.80,                # detection threshold\n    }\n\"\"\"\n\nimport functools\nimport logging\nimport os\nimport sys\nfrom pathlib import Path\n\nimport numpy as np\nimport xarray as xr\n\nfrom openeo.metadata import CollectionMetadata\n\n# ---------------------------------------------------------------------------\n# Make UDF dependency archives importable.\n# These two folders are produced by openEO when udf-dependency-archives is set.\n# ---------------------------------------------------------------------------\nsys.path.append(\"onnx_deps\")\nimport onnxruntime as ort  # noqa: E402\n\nsys.path.append(\"onnx_models\")\n\nlogger = logging.getLogger(__name__)\n\n# ---------------------------------------------------------------------------\n# Constants\n# ---------------------------------------------------------------------------\nNUM_THREADS = 2\n\nDEFAULT_MODEL_NAME = \"solar_pv.onnx\"\nDEFAULT_THRESHOLD = 0.80\n\nMODEL_DIR = \"onnx_models/solar_pv_rui\"\nBAND_STATS_FILENAME = \"band_stats.npz\"\n\n# Sentinel-2 L1C 13-band order expected by the model\nS2_L1C_BANDS = [\n    \"B01\", \"B02\", \"B03\", \"B04\", \"B05\", \"B06\", \"B07\",\n    \"B08\", \"B8A\", \"B09\", \"B10\", \"B11\", \"B12\",\n]\n\n\n# ---------------------------------------------------------------------------\n# ONNX session loading (cached per executor)\n# ---------------------------------------------------------------------------\n\ndef _ort_session_options() -> ort.SessionOptions:\n    so = ort.SessionOptions()\n    so.intra_op_num_threads = NUM_THREADS\n    so.inter_op_num_threads = NUM_THREADS\n    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL\n    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL\n    so.enable_cpu_mem_arena = True\n    so.enable_mem_pattern = True\n    return so\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_session() -> ort.InferenceSession:\n    \"\"\"Load the ONNX model from the dependency archive.\"\"\"\n    model_root = Path(MODEL_DIR)\n    model_path = model_root / DEFAULT_MODEL_NAME\n\n    if not model_path.exists():\n        # Support nested zip layouts (e.g. onnx_models/<subdir>/solar_pv.onnx)\n        by_name = list(model_root.rglob(DEFAULT_MODEL_NAME))\n        if len(by_name) == 1:\n            model_path = by_name[0]\n        elif len(by_name) > 1:\n            raise FileNotFoundError(\n                f\"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}: \"\n                f\"{[str(p) for p in by_name]}.\"\n            )\n        else:\n            all_onnx = list(model_root.rglob(\"*.onnx\"))\n            if len(all_onnx) == 1:\n                model_path = all_onnx[0]\n                logger.info(\n                    \"Default model '%s' not found, auto-selected only ONNX model: %s\",\n                    DEFAULT_MODEL_NAME,\n                    model_path,\n                )\n            else:\n                raise FileNotFoundError(\n                    f\"ONNX model not found for '{DEFAULT_MODEL_NAME}' under {model_root}. \"\n                    f\"Found ONNX files: {[str(p) for p in all_onnx]}.\"\n                )\n\n    logger.info(\"Loading ONNX model: %s\", model_path)\n    session = ort.InferenceSession(\n        str(model_path),\n        sess_options=_ort_session_options(),\n        providers=[\"CPUExecutionProvider\"],\n    )\n\n    # Apply CPU env hints (idempotent)\n    os.environ.setdefault(\"OMP_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"MKL_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"OPENBLAS_NUM_THREADS\", str(NUM_THREADS))\n\n    return session\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_band_stats() -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Load per-band mean/std for z-score normalization (matching training).\"\"\"\n    model_root = Path(MODEL_DIR)\n    stats_path = model_root / BAND_STATS_FILENAME\n\n    if not stats_path.exists():\n        matches = list(model_root.rglob(BAND_STATS_FILENAME))\n        if len(matches) == 1:\n            stats_path = matches[0]\n            logger.info(\"Resolved nested band stats path: %s\", stats_path)\n        elif len(matches) > 1:\n            logger.warning(\n                \"Multiple %s files found under %s; using first: %s\",\n                BAND_STATS_FILENAME,\n                model_root,\n                matches[0],\n            )\n            stats_path = matches[0]\n\n    if not stats_path.exists():\n        raise FileNotFoundError(\n            f\"band_stats.npz not found under {model_root}. \"\n            f\"Ensure it is included in the model archive.\"\n        )\n\n    data = np.load(stats_path)\n    mean = data[\"mean\"].astype(np.float32)\n    std = data[\"std\"].astype(np.float32)\n    if mean.shape != (13,) or std.shape != (13,):\n        raise ValueError(\n            f\"Unexpected band_stats shape: mean={mean.shape}, std={std.shape}\"\n        )\n    logger.info(\"Loaded band_stats from %s: mean=%s, std=%s\", stats_path, mean, std)\n    return mean, std\n\n\n# ---------------------------------------------------------------------------\n# Inference helpers\n# ---------------------------------------------------------------------------\n\n# Robust per-chip statistics use the middle band of the pixel distribution to\n# avoid contamination from clouds, water, snow, panels themselves, etc.\nROBUST_LOW_PCT = 5.0\nROBUST_HIGH_PCT = 95.0\n\n\ndef _normalize_zscore(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Histogram-aligned normalization to match training distribution.\n\n    For each band we compute robust per-chip mean and std (using the middle\n    p5..p95 of the pixel distribution to suppress outliers) and linearly\n    rescale the chip so that its distribution matches the training mean/std\n    loaded from band_stats.npz. The model expects inputs that look like the\n    training data after z-score, i.e. roughly N(0, 1) per band.\n\n    Steps per band:\n        1. clip to [p5, p95] to compute robust chip mean / std\n        2. rescale full chip:  x' = (x - chip_mean) / chip_std\n        3. apply training z-score to bring to model input space:\n           x_in = x' * train_std + train_mean   (now matches training scale)\n           x_in = (x_in - train_mean) / train_std  (final z-score)\n        Combined the two steps collapse to:\n           x_in = (x - chip_mean) / chip_std\n\n    The training stats are still loaded for diagnostic logging so that we can\n    compare the chip distribution against the expected training distribution.\n    \"\"\"\n    train_mean, train_std = _load_band_stats()\n\n    # Pixels can be NaN at tile edges or from padded neighborhoods.\n    invalid_mask = ~np.isfinite(image_hwc).all(axis=-1)  # (H, W)\n\n    h, w, c = image_hwc.shape\n    image_norm = np.zeros_like(image_hwc, dtype=np.float32)\n\n    for b in range(c):\n        band = image_hwc[:, :, b]\n        finite = band[np.isfinite(band)]\n        if finite.size == 0:\n            # Fully invalid band: leave at zero.\n            continue\n\n        # Robust per-chip stats over middle p5..p95.\n        lo, hi = np.percentile(finite, [ROBUST_LOW_PCT, ROBUST_HIGH_PCT])\n        mid = finite[(finite >= lo) & (finite <= hi)]\n        if mid.size < 16:\n            mid = finite  # Degenerate distribution: fall back to all finite pixels.\n\n        chip_mu = float(np.mean(mid))\n        chip_sigma = float(np.std(mid))\n        if chip_sigma < 1e-3:\n            chip_sigma = 1.0  # Avoid divide-by-zero on flat bands.\n\n        # Replace non-finite with chip mean before rescaling.\n        band_clean = np.where(np.isfinite(band), band, chip_mu)\n\n        # Per-chip standardization to N(0, 1) \u2014 what the model was trained on.\n        image_norm[:, :, b] = (band_clean - chip_mu) / chip_sigma\n\n        logger.info(\n            \"BAND %d ALIGN: chip_mu=%.2f chip_sigma=%.2f | train_mu=%.2f train_sigma=%.2f\",\n            b, chip_mu, chip_sigma, float(train_mean[b]), float(train_std[b]),\n        )\n\n    image_norm = np.nan_to_num(image_norm, nan=0.0, posinf=0.0, neginf=0.0)\n    return image_norm.astype(np.float32), invalid_mask\n\n\ndef _ensure_band_order(cube: xr.DataArray) -> xr.DataArray:\n    \"\"\"Reorder bands to the 13-band L1C order expected by the model.\"\"\"\n    available = list(cube.coords[\"bands\"].values)\n    target = [b for b in S2_L1C_BANDS if b in available]\n    if len(target) != 13:\n        raise ValueError(\n            f\"Expected 13 L1C bands, found {len(target)} in cube. \"\n            f\"Available={available}, required={S2_L1C_BANDS}\"\n        )\n    if available != target:\n        cube = cube.sel(bands=target)\n    return cube\n\n\ndef _run_inference(\n    session: ort.InferenceSession,\n    image_hwc: np.ndarray,\n    threshold: float,\n) -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Run the ONNX model on a single chip.\n\n    Returns\n    -------\n    binary : np.ndarray, shape (H, W), uint8 in {0, 1}\n    probs  : np.ndarray, shape (H, W), float32 in [0, 1]\n    \"\"\"\n    h, w = image_hwc.shape[0], image_hwc.shape[1]\n    image_norm, invalid_mask = _normalize_zscore(image_hwc.astype(np.float32))\n\n    # Fully invalid chunk: return zeros directly.\n    if bool(invalid_mask.all()):\n        return (\n            np.zeros((h, w), dtype=np.uint8),\n            np.zeros((h, w), dtype=np.float32),\n        )\n\n    batch = image_norm[np.newaxis, ...]  # (1, H, W, 13)\n\n    # Log normalized input range\n    logger.info(\n        \"NORMALIZED input: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        batch.shape, float(batch.min()), float(batch.max()), float(batch.mean()),\n    )\n\n    input_name = session.get_inputs()[0].name\n    probs = session.run(None, {input_name: batch})[0]  # (1, H, W, 1)\n    probs = np.squeeze(probs, axis=(0, -1)).astype(np.float32)  # (H, W)\n\n    # Log model output range\n    logger.info(\n        \"MODEL OUTPUT: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        probs.shape, float(probs.min()), float(probs.max()), float(probs.mean()),\n    )\n\n    # Never predict positives on invalid (NaN/padded) pixels.\n    probs[invalid_mask] = 0.0\n\n    binary = (probs > threshold).astype(np.uint8)\n    return binary, probs\n\n\ndef _apply_per_time(cube: xr.DataArray, context: dict) -> xr.DataArray:\n    \"\"\"Run inference on a single (bands, y, x) cube.\n\n    Always returns a 2-band output stacked along the ``bands`` dimension:\n        - solar_pv             (uint8 binary mask)\n        - solar_pv_probability (float32 probability)\n    \"\"\"\n    threshold = float(context.get(\"threshold\", DEFAULT_THRESHOLD))\n\n    cube = _ensure_band_order(cube)\n\n    # Drop temporal dimension if a degenerate one is present\n    if \"t\" in cube.dims:\n        cube = cube.squeeze(\"t\", drop=True)\n\n    cube = cube.transpose(\"y\", \"x\", \"bands\")\n    image_hwc = cube.values.astype(np.float32)\n\n    h, w, c = image_hwc.shape\n    if c != 13:\n        raise ValueError(f\"Expected 13 bands at last axis, got shape={image_hwc.shape}\")\n\n    # Diagnostic logging: raw input statistics per band\n    finite_mask = np.isfinite(image_hwc)\n    for b in range(c):\n        band_vals = image_hwc[:, :, b]\n        fin = band_vals[finite_mask[:, :, b]]\n        if fin.size > 0:\n            logger.info(\n                \"INPUT band %d: min=%.2f max=%.2f mean=%.2f std=%.2f finite_pct=%.1f%%\",\n                b, fin.min(), fin.max(), fin.mean(), fin.std(),\n                100.0 * fin.size / band_vals.size,\n            )\n        else:\n            logger.info(\"INPUT band %d: ALL NaN/Inf\", b)\n\n    session = _load_session()\n    binary, probs = _run_inference(session, image_hwc, threshold)\n\n    stacked = np.stack([binary.astype(np.float32), probs.astype(np.float32)], axis=0)\n\n    return xr.DataArray(\n        stacked,\n        dims=(\"bands\", \"y\", \"x\"),\n        coords={\n            \"bands\": [\"solar_pv\", \"solar_pv_probability\"],\n            \"y\": cube.coords[\"y\"],\n            \"x\": cube.coords[\"x\"],\n        },\n    )\n\n\n# ---------------------------------------------------------------------------\n# OpenEO UDF entry points\n# ---------------------------------------------------------------------------\n\ndef apply_metadata(metadata: CollectionMetadata, context: dict) -> CollectionMetadata:\n    \"\"\"Rename the bands of the output cube to the two-band stacked output.\"\"\"\n    return metadata.rename_labels(\n        dimension=\"bands\",\n        target=[\"solar_pv\", \"solar_pv_probability\"],\n    )\n\n\ndef apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:\n    \"\"\"Main UDF entry point (apply_neighborhood callback).\"\"\"\n    return _apply_per_time(cube, context)\n"
+                "udf": "\"\"\"OpenEO UDF: Solar PV detection using ONNX runtime.\n\nThis UDF runs binary segmentation of solar PV panels on a 13-band\nSentinel-2 L1C composite (cloud-free temporal mosaic).\n\nIt is designed to be invoked via ``apply_neighborhood`` on 256x256\nspatial chunks because the underlying U-Net segmentation model has a\nfixed spatial input size (256, 256, 13).\n\nModel and ONNX runtime are expected to be supplied as UDF dependency\narchives via ``udf-dependency-archives`` job options:\n\n    udf-dependency-archives:\n        - <onnx_runtime_archive>.zip#onnx_deps\n        - <model_archive>.zip#onnx_models\n\nThe archives expose:\n    onnx_deps/      -> onnxruntime python package\n    onnx_models/    -> solar_pv.onnx + band_stats.npz\n\n``band_stats.npz`` is required (no fallback in production).\n\nDefault model archive URL (zipped model bundle):\n\n    https://s3.waw3-1.cloudferro.com/project_dependencies/apex_pv_rui/solar_pv_rui.zip\n\nOutput: a four-band cube with bands:\n    - solar_pv               (uint8, 0/1, probability > threshold)\n    - solar_pv_probability   (float32, sigmoid output in [0, 1])\n    - pre_norm_mean          (float32, mean of input across 13 bands before normalization)\n    - post_norm_mean         (float32, mean of input across 13 bands after z-score normalization)\n\nThe pre_norm and post_norm bands are diagnostic outputs for debugging the\nnormalization process. They show the per-pixel mean values before and after\nthe robust z-score alignment.\n\nThreshold and normalization can be overridden via the UDF ``context`` dict::\n\n    context = {\n        \"threshold\": 0.80,             # detection threshold\n        \"normalization\": \"percentile\", # 'percentile' (default, matches training)\n                                       # or 'zscore'\n    }\n\"\"\"\n\nimport functools\nimport logging\nimport os\nimport sys\nfrom pathlib import Path\n\nimport numpy as np\nimport xarray as xr\n\nfrom openeo.metadata import CollectionMetadata\n\n# ---------------------------------------------------------------------------\n# Make UDF dependency archives importable.\n# These two folders are produced by openEO when udf-dependency-archives is set.\n# ---------------------------------------------------------------------------\nsys.path.append(\"onnx_deps\")\nimport onnxruntime as ort  # noqa: E402\n\nsys.path.append(\"onnx_models\")\n\nlogger = logging.getLogger(__name__)\n\n# ---------------------------------------------------------------------------\n# Constants\n# ---------------------------------------------------------------------------\nNUM_THREADS = 2\n\nDEFAULT_MODEL_NAME = \"solar_pv.onnx\"\nDEFAULT_THRESHOLD = 0.80\n\nMODEL_DIR = \"onnx_models/solar_pv_rui\"\nBAND_STATS_FILENAME = \"band_stats.npz\"\n\n# Sentinel-2 L1C 13-band order expected by the model\nS2_L1C_BANDS = [\n    \"B01\", \"B02\", \"B03\", \"B04\", \"B05\", \"B06\", \"B07\",\n    \"B08\", \"B8A\", \"B09\", \"B10\", \"B11\", \"B12\",\n]\n\n\n# ---------------------------------------------------------------------------\n# ONNX session loading (cached per executor)\n# ---------------------------------------------------------------------------\n\ndef _ort_session_options() -> ort.SessionOptions:\n    so = ort.SessionOptions()\n    so.intra_op_num_threads = NUM_THREADS\n    so.inter_op_num_threads = NUM_THREADS\n    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL\n    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL\n    so.enable_cpu_mem_arena = True\n    so.enable_mem_pattern = True\n    return so\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_session() -> ort.InferenceSession:\n    \"\"\"Load the ONNX model from the dependency archive.\"\"\"\n    model_root = Path(MODEL_DIR)\n    model_path = model_root / DEFAULT_MODEL_NAME\n\n    if not model_path.exists():\n        # Support nested zip layouts (e.g. onnx_models/<subdir>/solar_pv.onnx)\n        by_name = list(model_root.rglob(DEFAULT_MODEL_NAME))\n        if len(by_name) == 1:\n            model_path = by_name[0]\n        elif len(by_name) > 1:\n            raise FileNotFoundError(\n                f\"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}: \"\n                f\"{[str(p) for p in by_name]}.\"\n            )\n        else:\n            all_onnx = list(model_root.rglob(\"*.onnx\"))\n            if len(all_onnx) == 1:\n                model_path = all_onnx[0]\n                logger.info(\n                    \"Default model '%s' not found, auto-selected only ONNX model: %s\",\n                    DEFAULT_MODEL_NAME,\n                    model_path,\n                )\n            else:\n                raise FileNotFoundError(\n                    f\"ONNX model not found for '{DEFAULT_MODEL_NAME}' under {model_root}. \"\n                    f\"Found ONNX files: {[str(p) for p in all_onnx]}.\"\n                )\n\n    logger.info(\"Loading ONNX model: %s\", model_path)\n    session = ort.InferenceSession(\n        str(model_path),\n        sess_options=_ort_session_options(),\n        providers=[\"CPUExecutionProvider\"],\n    )\n\n    # Apply CPU env hints (idempotent)\n    os.environ.setdefault(\"OMP_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"MKL_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"OPENBLAS_NUM_THREADS\", str(NUM_THREADS))\n\n    return session\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_band_stats() -> dict:\n    \"\"\"Load per-band stats for normalization (matching training distribution).\n\n    The .npz file is produced by `solar_ml.data.compute_h5_band_stats` and\n    contains: mean, std, p2, p98, counts. The winning training run uses\n    PERCENTILE normalization (p2..p98 -> [0, 1]), not z-score.\n    \"\"\"\n    model_root = Path(MODEL_DIR)\n    stats_path = model_root / BAND_STATS_FILENAME\n\n    if not stats_path.exists():\n        matches = list(model_root.rglob(BAND_STATS_FILENAME))\n        if len(matches) == 1:\n            stats_path = matches[0]\n            logger.info(\"Resolved nested band stats path: %s\", stats_path)\n        elif len(matches) > 1:\n            logger.warning(\n                \"Multiple %s files found under %s; using first: %s\",\n                BAND_STATS_FILENAME,\n                model_root,\n                matches[0],\n            )\n            stats_path = matches[0]\n\n    if not stats_path.exists():\n        raise FileNotFoundError(\n            f\"band_stats.npz not found under {model_root}. \"\n            f\"Ensure it is included in the model archive.\"\n        )\n\n    data = np.load(stats_path)\n    stats = {\n        \"mean\": data[\"mean\"].astype(np.float32),\n        \"std\": data[\"std\"].astype(np.float32),\n    }\n    # p2/p98 are required for the production percentile normalization.\n    if \"p2\" in data.files and \"p98\" in data.files:\n        stats[\"p2\"] = data[\"p2\"].astype(np.float32)\n        stats[\"p98\"] = data[\"p98\"].astype(np.float32)\n    else:\n        raise ValueError(\n            f\"band_stats.npz at {stats_path} is missing 'p2'/'p98' arrays \"\n            f\"required for percentile normalization. Found keys: {list(data.files)}\"\n        )\n\n    for key in (\"mean\", \"std\", \"p2\", \"p98\"):\n        if stats[key].shape != (13,):\n            raise ValueError(\n                f\"Unexpected band_stats[{key}] shape: {stats[key].shape}, expected (13,)\"\n            )\n    logger.info(\n        \"Loaded band_stats from %s: mean=%s std=%s p2=%s p98=%s\",\n        stats_path, stats[\"mean\"], stats[\"std\"], stats[\"p2\"], stats[\"p98\"],\n    )\n    return stats\n\n\n# ---------------------------------------------------------------------------\n# Inference helpers\n# ---------------------------------------------------------------------------\n\nDEFAULT_NORMALIZATION = \"percentile\"  # matches winning training run\n\n# Robust per-chip statistics use the middle band of the pixel distribution to\n# avoid contamination from clouds, water, snow, panels themselves, etc.\nROBUST_LOW_PCT = 5.0\nROBUST_HIGH_PCT = 95.0\n\n\ndef _normalize_training(\n    image_hwc: np.ndarray,\n    normalization: str = DEFAULT_NORMALIZATION,\n) -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Normalize a chip exactly the way the training pipeline does.\n\n    Mirrors `solar_ml.data.normalize_batch`:\n      - normalization == \"percentile\":\n            x' = clip((x - p2) / max(p98 - p2, 1.0), 0, 1)\n      - normalization == \"zscore\":\n            x' = (x - mean) / std\n\n    Stats come from band_stats.npz (mounted via UDF dependency archive).\n    NaN/invalid pixels are zeroed after normalization and reported via\n    invalid_mask so the model never predicts on padded pixels.\n    \"\"\"\n    stats = _load_band_stats()\n    mean = stats[\"mean\"]\n    std = stats[\"std\"]\n    p2 = stats[\"p2\"]\n    p98 = stats[\"p98\"]\n\n    invalid_mask = ~np.isfinite(image_hwc).all(axis=-1)  # (H, W)\n\n    # Replace non-finite with the per-band mean BEFORE normalization\n    # (consistent with training, where chips have no NaNs).\n    image = image_hwc.astype(np.float32, copy=True)\n    for b in range(image.shape[-1]):\n        band = image[:, :, b]\n        nan_mask = ~np.isfinite(band)\n        if nan_mask.any():\n            band[nan_mask] = float(mean[b])\n\n    if normalization == \"zscore\":\n        image_norm = (image - mean[None, None, :]) / std[None, None, :]\n    elif normalization == \"percentile\":\n        denom = np.maximum(p98 - p2, 1.0)\n        scaled = (image - p2[None, None, :]) / denom[None, None, :]\n        image_norm = np.clip(scaled, 0.0, 1.0)\n    else:\n        raise ValueError(\n            f\"Unknown normalization mode '{normalization}'. \"\n            f\"Supported: 'percentile', 'zscore'.\"\n        )\n\n    image_norm = np.nan_to_num(image_norm, nan=0.0, posinf=0.0, neginf=0.0)\n    return image_norm.astype(np.float32), invalid_mask\n\n\ndef _ensure_band_order(cube: xr.DataArray) -> xr.DataArray:\n    \"\"\"Reorder bands to the 13-band L1C order expected by the model.\"\"\"\n    available = list(cube.coords[\"bands\"].values)\n    target = [b for b in S2_L1C_BANDS if b in available]\n    if len(target) != 13:\n        raise ValueError(\n            f\"Expected 13 L1C bands, found {len(target)} in cube. \"\n            f\"Available={available}, required={S2_L1C_BANDS}\"\n        )\n    if available != target:\n        cube = cube.sel(bands=target)\n    return cube\n\n\ndef _run_inference(\n    session: ort.InferenceSession,\n    image_hwc: np.ndarray,\n    threshold: float,\n    normalization: str = DEFAULT_NORMALIZATION,\n) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:\n    \"\"\"Run the ONNX model on a single chip.\n\n    Returns\n    -------\n    binary : np.ndarray, shape (H, W), uint8 in {0, 1}\n    probs  : np.ndarray, shape (H, W), float32 in [0, 1]\n    image_pre_norm  : np.ndarray, shape (H, W), float32 (mean across bands pre-normalization)\n    image_post_norm : np.ndarray, shape (H, W), float32 (mean across bands post-normalization)\n    \"\"\"\n    h, w = image_hwc.shape[0], image_hwc.shape[1]\n\n    # Capture pre-normalization state (mean across all 13 bands)\n    image_pre_norm = np.nanmean(image_hwc.astype(np.float32), axis=-1)  # (H, W)\n    image_pre_norm = np.nan_to_num(image_pre_norm, nan=0.0, posinf=0.0, neginf=0.0)\n\n    image_norm, invalid_mask = _normalize_training(\n        image_hwc.astype(np.float32),\n        normalization=normalization,\n    )\n\n    # Fully invalid chunk: return zeros directly.\n    if bool(invalid_mask.all()):\n        return (\n            np.zeros((h, w), dtype=np.uint8),\n            np.zeros((h, w), dtype=np.float32),\n            image_pre_norm,\n            np.zeros((h, w), dtype=np.float32),\n        )\n\n    batch = image_norm[np.newaxis, ...]  # (1, H, W, 13)\n\n    # Capture post-normalization state (mean across all 13 bands)\n    image_post_norm = np.mean(image_norm, axis=-1)  # (H, W)\n\n    # Log normalized input range\n    logger.info(\n        \"NORMALIZED input: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        batch.shape, float(batch.min()), float(batch.max()), float(batch.mean()),\n    )\n\n    input_name = session.get_inputs()[0].name\n    probs = session.run(None, {input_name: batch})[0]  # (1, H, W, 1)\n    probs = np.squeeze(probs, axis=(0, -1)).astype(np.float32)  # (H, W)\n\n    # Log model output range\n    logger.info(\n        \"MODEL OUTPUT: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        probs.shape, float(probs.min()), float(probs.max()), float(probs.mean()),\n    )\n\n    # Never predict positives on invalid (NaN/padded) pixels.\n    probs[invalid_mask] = 0.0\n\n    binary = (probs > threshold).astype(np.uint8)\n    return binary, probs, image_pre_norm, image_post_norm\n\n\ndef _apply_per_time(cube: xr.DataArray, context: dict) -> xr.DataArray:\n    \"\"\"Run inference on a single (bands, y, x) cube.\n\n    Always returns a 4-band output stacked along the ``bands`` dimension:\n        - solar_pv             (uint8 binary mask)\n        - solar_pv_probability (float32 probability)\n        - pre_norm_mean        (float32, mean across 13 bands pre-normalization)\n        - post_norm_mean       (float32, mean across 13 bands post-normalization)\n    \"\"\"\n    threshold = float(context.get(\"threshold\", DEFAULT_THRESHOLD))\n    normalization = str(context.get(\"normalization\", DEFAULT_NORMALIZATION)).lower()\n    if normalization not in (\"percentile\", \"zscore\"):\n        logger.warning(\n            \"Unknown normalization '%s' in context; falling back to '%s'.\",\n            normalization, DEFAULT_NORMALIZATION,\n        )\n        normalization = DEFAULT_NORMALIZATION\n    logger.info(\"Using '%s' normalization (training band_stats.npz).\", normalization)\n\n    cube = _ensure_band_order(cube)\n\n    # Drop temporal dimension if a degenerate one is present\n    if \"t\" in cube.dims:\n        cube = cube.squeeze(\"t\", drop=True)\n\n    cube = cube.transpose(\"y\", \"x\", \"bands\")\n    image_hwc = cube.values.astype(np.float32)\n\n    h, w, c = image_hwc.shape\n    if c != 13:\n        raise ValueError(f\"Expected 13 bands at last axis, got shape={image_hwc.shape}\")\n\n    # Diagnostic logging: raw input statistics per band\n    finite_mask = np.isfinite(image_hwc)\n    for b in range(c):\n        band_vals = image_hwc[:, :, b]\n        fin = band_vals[finite_mask[:, :, b]]\n        if fin.size > 0:\n            logger.info(\n                \"INPUT band %d: min=%.2f max=%.2f mean=%.2f std=%.2f finite_pct=%.1f%%\",\n                b, fin.min(), fin.max(), fin.mean(), fin.std(),\n                100.0 * fin.size / band_vals.size,\n            )\n        else:\n            logger.info(\"INPUT band %d: ALL NaN/Inf\", b)\n\n    session = _load_session()\n    binary, probs, image_pre_norm, image_post_norm = _run_inference(\n        session,\n        image_hwc,\n        threshold,\n        normalization=normalization,\n    )\n\n    stacked = np.stack([\n        binary.astype(np.float32),\n        probs.astype(np.float32),\n        image_pre_norm.astype(np.float32),\n        image_post_norm.astype(np.float32),\n    ], axis=0)\n\n    return xr.DataArray(\n        stacked,\n        dims=(\"bands\", \"y\", \"x\"),\n        coords={\n            \"bands\": [\"solar_pv\", \"solar_pv_probability\", \"pre_norm_mean\", \"post_norm_mean\"],\n            \"y\": cube.coords[\"y\"],\n            \"x\": cube.coords[\"x\"],\n        },\n    )\n\n\n# ---------------------------------------------------------------------------\n# OpenEO UDF entry points\n# ---------------------------------------------------------------------------\n\ndef apply_metadata(metadata: CollectionMetadata, context: dict) -> CollectionMetadata:\n    \"\"\"Rename the bands of the output cube to the four-band stacked output.\"\"\"\n    return metadata.rename_labels(\n        dimension=\"bands\",\n        target=[\"solar_pv\", \"solar_pv_probability\", \"pre_norm_mean\", \"post_norm_mean\"],\n    )\n\n\ndef apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:\n    \"\"\"Main UDF entry point (apply_neighborhood callback).\"\"\"\n    return _apply_per_time(cube, context)\n"
               },
               "result": true
             }
@@ -315,12 +196,12 @@
         "size": [
           {
             "dimension": "x",
-            "value": 256,
+            "value": 192,
             "unit": "px"
           },
           {
             "dimension": "y",
-            "value": 256,
+            "value": 192,
             "unit": "px"
           }
         ]
