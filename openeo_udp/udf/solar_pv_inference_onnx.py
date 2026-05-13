@@ -24,14 +24,22 @@ Default model archive URL (zipped model bundle):
 
     https://s3.waw3-1.cloudferro.com/project_dependencies/apex_pv_rui/solar_pv_rui.zip
 
-Output: a two-band cube with bands:
+Output: a four-band cube with bands:
     - solar_pv               (uint8, 0/1, probability > threshold)
     - solar_pv_probability   (float32, sigmoid output in [0, 1])
+    - pre_norm_mean          (float32, mean of input across 13 bands before normalization)
+    - post_norm_mean         (float32, mean of input across 13 bands after z-score normalization)
 
-Threshold can be overridden via the UDF ``context`` dict::
+The pre_norm and post_norm bands are diagnostic outputs for debugging the
+normalization process. They show the per-pixel mean values before and after
+the robust z-score alignment.
+
+Threshold and normalization can be overridden via the UDF ``context`` dict::
 
     context = {
-        "threshold": 0.80,                # detection threshold
+        "threshold": 0.80,             # detection threshold
+        "normalization": "percentile", # 'percentile' (default, matches training)
+                                       # or 'zscore'
     }
 """
 
@@ -137,8 +145,13 @@ def _load_session() -> ort.InferenceSession:
 
 
 @functools.lru_cache(maxsize=1)
-def _load_band_stats() -> tuple[np.ndarray, np.ndarray]:
-    """Load per-band mean/std for z-score normalization (matching training)."""
+def _load_band_stats() -> dict:
+    """Load per-band stats for normalization (matching training distribution).
+
+    The .npz file is produced by `solar_ml.data.compute_h5_band_stats` and
+    contains: mean, std, p2, p98, counts. The winning training run uses
+    PERCENTILE normalization (p2..p98 -> [0, 1]), not z-score.
+    """
     model_root = Path(MODEL_DIR)
     stats_path = model_root / BAND_STATS_FILENAME
 
@@ -163,19 +176,37 @@ def _load_band_stats() -> tuple[np.ndarray, np.ndarray]:
         )
 
     data = np.load(stats_path)
-    mean = data["mean"].astype(np.float32)
-    std = data["std"].astype(np.float32)
-    if mean.shape != (13,) or std.shape != (13,):
+    stats = {
+        "mean": data["mean"].astype(np.float32),
+        "std": data["std"].astype(np.float32),
+    }
+    # p2/p98 are required for the production percentile normalization.
+    if "p2" in data.files and "p98" in data.files:
+        stats["p2"] = data["p2"].astype(np.float32)
+        stats["p98"] = data["p98"].astype(np.float32)
+    else:
         raise ValueError(
-            f"Unexpected band_stats shape: mean={mean.shape}, std={std.shape}"
+            f"band_stats.npz at {stats_path} is missing 'p2'/'p98' arrays "
+            f"required for percentile normalization. Found keys: {list(data.files)}"
         )
-    logger.info("Loaded band_stats from %s: mean=%s, std=%s", stats_path, mean, std)
-    return mean, std
+
+    for key in ("mean", "std", "p2", "p98"):
+        if stats[key].shape != (13,):
+            raise ValueError(
+                f"Unexpected band_stats[{key}] shape: {stats[key].shape}, expected (13,)"
+            )
+    logger.info(
+        "Loaded band_stats from %s: mean=%s std=%s p2=%s p98=%s",
+        stats_path, stats["mean"], stats["std"], stats["p2"], stats["p98"],
+    )
+    return stats
 
 
 # ---------------------------------------------------------------------------
 # Inference helpers
 # ---------------------------------------------------------------------------
+
+DEFAULT_NORMALIZATION = "percentile"  # matches winning training run
 
 # Robust per-chip statistics use the middle band of the pixel distribution to
 # avoid contamination from clouds, water, snow, panels themselves, etc.
@@ -183,62 +214,49 @@ ROBUST_LOW_PCT = 5.0
 ROBUST_HIGH_PCT = 95.0
 
 
-def _normalize_zscore(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Histogram-aligned normalization to match training distribution.
+def _normalize_training(
+    image_hwc: np.ndarray,
+    normalization: str = DEFAULT_NORMALIZATION,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize a chip exactly the way the training pipeline does.
 
-    For each band we compute robust per-chip mean and std (using the middle
-    p5..p95 of the pixel distribution to suppress outliers) and linearly
-    rescale the chip so that its distribution matches the training mean/std
-    loaded from band_stats.npz. The model expects inputs that look like the
-    training data after z-score, i.e. roughly N(0, 1) per band.
+    Mirrors `solar_ml.data.normalize_batch`:
+      - normalization == "percentile":
+            x' = clip((x - p2) / max(p98 - p2, 1.0), 0, 1)
+      - normalization == "zscore":
+            x' = (x - mean) / std
 
-    Steps per band:
-        1. clip to [p5, p95] to compute robust chip mean / std
-        2. rescale full chip:  x' = (x - chip_mean) / chip_std
-        3. apply training z-score to bring to model input space:
-           x_in = x' * train_std + train_mean   (now matches training scale)
-           x_in = (x_in - train_mean) / train_std  (final z-score)
-        Combined the two steps collapse to:
-           x_in = (x - chip_mean) / chip_std
-
-    The training stats are still loaded for diagnostic logging so that we can
-    compare the chip distribution against the expected training distribution.
+    Stats come from band_stats.npz (mounted via UDF dependency archive).
+    NaN/invalid pixels are zeroed after normalization and reported via
+    invalid_mask so the model never predicts on padded pixels.
     """
-    train_mean, train_std = _load_band_stats()
+    stats = _load_band_stats()
+    mean = stats["mean"]
+    std = stats["std"]
+    p2 = stats["p2"]
+    p98 = stats["p98"]
 
-    # Pixels can be NaN at tile edges or from padded neighborhoods.
     invalid_mask = ~np.isfinite(image_hwc).all(axis=-1)  # (H, W)
 
-    h, w, c = image_hwc.shape
-    image_norm = np.zeros_like(image_hwc, dtype=np.float32)
+    # Replace non-finite with the per-band mean BEFORE normalization
+    # (consistent with training, where chips have no NaNs).
+    image = image_hwc.astype(np.float32, copy=True)
+    for b in range(image.shape[-1]):
+        band = image[:, :, b]
+        nan_mask = ~np.isfinite(band)
+        if nan_mask.any():
+            band[nan_mask] = float(mean[b])
 
-    for b in range(c):
-        band = image_hwc[:, :, b]
-        finite = band[np.isfinite(band)]
-        if finite.size == 0:
-            # Fully invalid band: leave at zero.
-            continue
-
-        # Robust per-chip stats over middle p5..p95.
-        lo, hi = np.percentile(finite, [ROBUST_LOW_PCT, ROBUST_HIGH_PCT])
-        mid = finite[(finite >= lo) & (finite <= hi)]
-        if mid.size < 16:
-            mid = finite  # Degenerate distribution: fall back to all finite pixels.
-
-        chip_mu = float(np.mean(mid))
-        chip_sigma = float(np.std(mid))
-        if chip_sigma < 1e-3:
-            chip_sigma = 1.0  # Avoid divide-by-zero on flat bands.
-
-        # Replace non-finite with chip mean before rescaling.
-        band_clean = np.where(np.isfinite(band), band, chip_mu)
-
-        # Per-chip standardization to N(0, 1) — what the model was trained on.
-        image_norm[:, :, b] = (band_clean - chip_mu) / chip_sigma
-
-        logger.info(
-            "BAND %d ALIGN: chip_mu=%.2f chip_sigma=%.2f | train_mu=%.2f train_sigma=%.2f",
-            b, chip_mu, chip_sigma, float(train_mean[b]), float(train_std[b]),
+    if normalization == "zscore":
+        image_norm = (image - mean[None, None, :]) / std[None, None, :]
+    elif normalization == "percentile":
+        denom = np.maximum(p98 - p2, 1.0)
+        scaled = (image - p2[None, None, :]) / denom[None, None, :]
+        image_norm = np.clip(scaled, 0.0, 1.0)
+    else:
+        raise ValueError(
+            f"Unknown normalization mode '{normalization}'. "
+            f"Supported: 'percentile', 'zscore'."
         )
 
     image_norm = np.nan_to_num(image_norm, nan=0.0, posinf=0.0, neginf=0.0)
@@ -263,25 +281,41 @@ def _run_inference(
     session: ort.InferenceSession,
     image_hwc: np.ndarray,
     threshold: float,
-) -> tuple[np.ndarray, np.ndarray]:
+    normalization: str = DEFAULT_NORMALIZATION,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run the ONNX model on a single chip.
 
     Returns
     -------
     binary : np.ndarray, shape (H, W), uint8 in {0, 1}
     probs  : np.ndarray, shape (H, W), float32 in [0, 1]
+    image_pre_norm  : np.ndarray, shape (H, W), float32 (mean across bands pre-normalization)
+    image_post_norm : np.ndarray, shape (H, W), float32 (mean across bands post-normalization)
     """
     h, w = image_hwc.shape[0], image_hwc.shape[1]
-    image_norm, invalid_mask = _normalize_zscore(image_hwc.astype(np.float32))
+    
+    # Capture pre-normalization state (mean across all 13 bands)
+    image_pre_norm = np.nanmean(image_hwc.astype(np.float32), axis=-1)  # (H, W)
+    image_pre_norm = np.nan_to_num(image_pre_norm, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    image_norm, invalid_mask = _normalize_training(
+        image_hwc.astype(np.float32),
+        normalization=normalization,
+    )
 
     # Fully invalid chunk: return zeros directly.
     if bool(invalid_mask.all()):
         return (
             np.zeros((h, w), dtype=np.uint8),
             np.zeros((h, w), dtype=np.float32),
+            image_pre_norm,
+            np.zeros((h, w), dtype=np.float32),
         )
 
     batch = image_norm[np.newaxis, ...]  # (1, H, W, 13)
+    
+    # Capture post-normalization state (mean across all 13 bands)
+    image_post_norm = np.mean(image_norm, axis=-1)  # (H, W)
 
     # Log normalized input range
     logger.info(
@@ -303,17 +337,27 @@ def _run_inference(
     probs[invalid_mask] = 0.0
 
     binary = (probs > threshold).astype(np.uint8)
-    return binary, probs
+    return binary, probs, image_pre_norm, image_post_norm
 
 
 def _apply_per_time(cube: xr.DataArray, context: dict) -> xr.DataArray:
     """Run inference on a single (bands, y, x) cube.
 
-    Always returns a 2-band output stacked along the ``bands`` dimension:
+    Always returns a 4-band output stacked along the ``bands`` dimension:
         - solar_pv             (uint8 binary mask)
         - solar_pv_probability (float32 probability)
+        - pre_norm_mean        (float32, mean across 13 bands pre-normalization)
+        - post_norm_mean       (float32, mean across 13 bands post-normalization)
     """
     threshold = float(context.get("threshold", DEFAULT_THRESHOLD))
+    normalization = str(context.get("normalization", DEFAULT_NORMALIZATION)).lower()
+    if normalization not in ("percentile", "zscore"):
+        logger.warning(
+            "Unknown normalization '%s' in context; falling back to '%s'.",
+            normalization, DEFAULT_NORMALIZATION,
+        )
+        normalization = DEFAULT_NORMALIZATION
+    logger.info("Using '%s' normalization (training band_stats.npz).", normalization)
 
     cube = _ensure_band_order(cube)
 
@@ -343,15 +387,25 @@ def _apply_per_time(cube: xr.DataArray, context: dict) -> xr.DataArray:
             logger.info("INPUT band %d: ALL NaN/Inf", b)
 
     session = _load_session()
-    binary, probs = _run_inference(session, image_hwc, threshold)
+    binary, probs, image_pre_norm, image_post_norm = _run_inference(
+        session,
+        image_hwc,
+        threshold,
+        normalization=normalization,
+    )
 
-    stacked = np.stack([binary.astype(np.float32), probs.astype(np.float32)], axis=0)
+    stacked = np.stack([
+        binary.astype(np.float32),
+        probs.astype(np.float32),
+        image_pre_norm.astype(np.float32),
+        image_post_norm.astype(np.float32),
+    ], axis=0)
 
     return xr.DataArray(
         stacked,
         dims=("bands", "y", "x"),
         coords={
-            "bands": ["solar_pv", "solar_pv_probability"],
+            "bands": ["solar_pv", "solar_pv_probability", "pre_norm_mean", "post_norm_mean"],
             "y": cube.coords["y"],
             "x": cube.coords["x"],
         },
@@ -363,10 +417,10 @@ def _apply_per_time(cube: xr.DataArray, context: dict) -> xr.DataArray:
 # ---------------------------------------------------------------------------
 
 def apply_metadata(metadata: CollectionMetadata, context: dict) -> CollectionMetadata:
-    """Rename the bands of the output cube to the two-band stacked output."""
+    """Rename the bands of the output cube to the four-band stacked output."""
     return metadata.rename_labels(
         dimension="bands",
-        target=["solar_pv", "solar_pv_probability"],
+        target=["solar_pv", "solar_pv_probability", "pre_norm_mean", "post_norm_mean"],
     )
 
 
