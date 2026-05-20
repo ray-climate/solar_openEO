@@ -37,9 +37,10 @@ Options for Apex to resolve this:
 2. **Custom Docker runtime** — build a UDF container image with TF included
 3. **Convert to ONNX** — convert the Keras model to ONNX format for
    numpy-only inference via `onnxruntime` (lighter, more portable).
-   This repo now ships an ONNX-based UDF that does **not** require
-   TensorFlow on the backend:
-   - UDF: `openeo_udp/udf/solar_pv_inference_onnx.py`
+   This repo ships a single merged UDF that performs SLIC temporal
+   mosaicing and ONNX inference per chunk, requiring **no TensorFlow**
+   on the backend:
+   - UDF: `openeo_udp/udf/solar_pv_detection.py`
    - Process graph builder: `openeo_udp/process_graph/solar_pv_detection_onnx.py`
    - The model + onnxruntime are passed via `udf-dependency-archives`
 

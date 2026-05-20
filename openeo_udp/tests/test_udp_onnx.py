@@ -10,7 +10,9 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_THIS_FILE = Path(__file__).resolve() if "__file__" in globals() else Path.cwd() / "openeo_udp" / "tests" / "test_udp_onnx.py"
+_REPO_ROOT = _THIS_FILE.parents[2]
+sys.path.insert(0, str(_REPO_ROOT))
 
 import openeo
 
@@ -19,7 +21,7 @@ from openeo_udp.process_graph.solar_pv_detection_onnx import DEFAULT_JOB_OPTIONS
 # ---- edit here -------------------------------------------------------------
 BACKEND = "https://openeo.dataspace.copernicus.eu"
 
-UDP_JSON = Path(__file__).resolve().parents[1] / "process_graph" / "solar_pv_detection_onnx_udp.json"
+UDP_JSON = Path("openeo_udp/process_graph/solar_pv_detection_udp.json")
 OUT_DIR = Path(__file__).resolve().parent / "test_outputs"
 AOI = {
   "west": -120.15,
@@ -49,7 +51,7 @@ cube = conn.datacube_from_json(
 
 
 job = cube.create_job(
-    title="solar_pv_detection_onnx_test_nz",
+    title="solar_pv_detection_onnx_test_mosaic",
     out_format="GTiff",
     job_options=DEFAULT_JOB_OPTIONS,
 )

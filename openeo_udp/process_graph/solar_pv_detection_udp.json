@@ -1,0 +1,198 @@
+{
+  "process_graph": {
+    "loadcollection1": {
+      "process_id": "load_collection",
+      "arguments": {
+        "bands": [
+          "B01",
+          "B02",
+          "B03",
+          "B04",
+          "B05",
+          "B06",
+          "B07",
+          "B08",
+          "B8A",
+          "B09",
+          "B10",
+          "B11",
+          "B12"
+        ],
+        "id": "SENTINEL2_L1C",
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte1": {
+                "process_id": "lte",
+                "arguments": {
+                  "x": {
+                    "from_parameter": "value"
+                  },
+                  "y": 75
+                },
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "from_parameter": "spatial_extent"
+        },
+        "temporal_extent": {
+          "from_parameter": "temporal_extent"
+        }
+      }
+    },
+    "resamplespatial1": {
+      "process_id": "resample_spatial",
+      "arguments": {
+        "align": "upper-left",
+        "data": {
+          "from_node": "loadcollection1"
+        },
+        "method": "near",
+        "projection": "EPSG:3857",
+        "resolution": 10
+      }
+    },
+    "loadcollection2": {
+      "process_id": "load_collection",
+      "arguments": {
+        "bands": [
+          "SCL"
+        ],
+        "id": "SENTINEL2_L2A",
+        "properties": {
+          "eo:cloud_cover": {
+            "process_graph": {
+              "lte2": {
+                "process_id": "lte",
+                "arguments": {
+                  "x": {
+                    "from_parameter": "value"
+                  },
+                  "y": 75
+                },
+                "result": true
+              }
+            }
+          }
+        },
+        "spatial_extent": {
+          "from_parameter": "spatial_extent"
+        },
+        "temporal_extent": {
+          "from_parameter": "temporal_extent"
+        }
+      }
+    },
+    "resamplespatial2": {
+      "process_id": "resample_spatial",
+      "arguments": {
+        "align": "upper-left",
+        "data": {
+          "from_node": "loadcollection2"
+        },
+        "method": "near",
+        "projection": "EPSG:3857",
+        "resolution": 10
+      }
+    },
+    "mergecubes1": {
+      "process_id": "merge_cubes",
+      "arguments": {
+        "cube1": {
+          "from_node": "resamplespatial1"
+        },
+        "cube2": {
+          "from_node": "resamplespatial2"
+        }
+      }
+    },
+    "applyneighborhood1": {
+      "process_id": "apply_neighborhood",
+      "arguments": {
+        "data": {
+          "from_node": "mergecubes1"
+        },
+        "overlap": [
+          {
+            "dimension": "x",
+            "value": 32,
+            "unit": "px"
+          },
+          {
+            "dimension": "y",
+            "value": 32,
+            "unit": "px"
+          }
+        ],
+        "process": {
+          "process_graph": {
+            "runudf1": {
+              "process_id": "run_udf",
+              "arguments": {
+                "context": {
+                  "threshold": 0.8
+                },
+                "data": {
+                  "from_parameter": "data"
+                },
+                "runtime": "Python",
+                "udf": "\"\"\"OpenEO UDF: Solar PV detection (SLIC temporal mosaic + ONNX inference).\n\nThis UDF performs the full per-chunk pipeline in a single executor call:\n    1. SLIC-based cloud-free temporal mosaic of a multi-temporal Sentinel-2\n       L1C + SCL stack (mirrors the GEE SNIC pipeline used to build the\n       training chips).\n    2. Training-aligned percentile normalization (matches\n       ``solar_ml.data.normalize_batch`` with ``mode='percentile'``).\n    3. ONNX U-Net inference (fixed 256x256 / 13-band input).\n\nMerging both steps avoids an intermediate cube materialisation/shuffle\nbetween two ``apply_neighborhood`` calls.\n\nInvocation\n----------\nCall via ``apply_neighborhood`` on chunks of shape (T, 14, 256, 256)\nwhere the 14th band is SCL. Use ``size=192`` + ``overlap=32`` so each\nchunk is exactly 256x256 (the model input size) and adjacent chunks\nshare a 32 px halo for seam-free inference.\n\nDependency archives (job options ``udf-dependency-archives``)::\n\n    onnx_deps/    -> onnxruntime python package\n    onnx_models/  -> solar_pv.onnx + band_stats.npz\n\nOutput bands (2):\n    - solar_pv               (uint8 binary)\n    - solar_pv_probability   (float32)\n    - pre_norm_mean          (float32, mean across 13 bands pre-norm)\n    - post_norm_mean         (float32, mean across 13 bands post-norm)\n\nContext overrides::\n\n    {\n        \"threshold\": 0.80,             # detection threshold\n        \"clear_thresh\": 0.8,           # mosaic cluster clear-fraction threshold\n        \"top_n_scenes\": 8,             # max mosaic candidates\n        \"top_n_rescue\": 10,            # max rescue scenes\n        \"snic_size_px\": 20,            # SLIC superpixel size\n        \"snic_compactness\": 1.0,       # SLIC compactness\n    }\n\"\"\"\n\nimport functools\nimport logging\nimport os\nimport sys\nfrom pathlib import Path\nfrom typing import Tuple\n\nimport numpy as np\nimport xarray as xr\nfrom scipy import ndimage\n\nfrom openeo.metadata import CollectionMetadata\n\n# ---------------------------------------------------------------------------\n# Make UDF dependency archives importable.\n# ---------------------------------------------------------------------------\nsys.path.append(\"onnx_deps\")\nimport onnxruntime as ort  # noqa: E402\n\nsys.path.append(\"onnx_models\")\n\nlogger = logging.getLogger(__name__)\n\n\n# ===========================================================================\n# Constants\n# ===========================================================================\nNUM_THREADS = 2\n\nDEFAULT_MODEL_NAME = \"solar_pv.onnx\"\nDEFAULT_THRESHOLD = 0.80\n\nMODEL_DIR = \"onnx_models/solar_pv_rui\"\nBAND_STATS_FILENAME = \"band_stats.npz\"\n\nS2_L1C_BANDS = [\n    \"B01\", \"B02\", \"B03\", \"B04\", \"B05\", \"B06\", \"B07\",\n    \"B08\", \"B8A\", \"B09\", \"B10\", \"B11\", \"B12\",\n]\n\n# Mosaic defaults match extraction_pipeline/config.py\nDEFAULT_MOSAIC_PARAMS = {\n    \"snic_size_px\": 20,\n    \"snic_compactness\": 1.0,\n    \"clear_thresh\": 0.8,\n    \"top_n_scenes\": 8,\n    \"top_n_rescue\": 10,\n    \"patch_sizes\": [32, 16, 8],\n    \"feather_px\": 0,\n    # 4=vegetation, 5=bare, 6=water, 7=unclassified, 11=snow_ice\n    \"scl_clear_classes\": [4, 5, 6, 7, 11],\n}\n\n# Band indices (0-12) of the 13-band L1C stack used to build the reference\n# image for SLIC segmentation: B4, B3, B2, B8.\nREF_BAND_INDICES = [3, 2, 1, 7]\n\n\n# ===========================================================================\n# ONNX session + band stats loaders (cached per executor)\n# ===========================================================================\n\ndef _ort_session_options() -> ort.SessionOptions:\n    so = ort.SessionOptions()\n    so.intra_op_num_threads = NUM_THREADS\n    so.inter_op_num_threads = NUM_THREADS\n    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL\n    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL\n    so.enable_cpu_mem_arena = True\n    so.enable_mem_pattern = True\n    return so\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_session() -> ort.InferenceSession:\n    \"\"\"Load the ONNX model from the dependency archive.\"\"\"\n    model_root = Path(MODEL_DIR)\n    model_path = model_root / DEFAULT_MODEL_NAME\n\n    if not model_path.exists():\n        by_name = list(model_root.rglob(DEFAULT_MODEL_NAME))\n        if len(by_name) == 1:\n            model_path = by_name[0]\n        elif len(by_name) > 1:\n            raise FileNotFoundError(\n                f\"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}.\"\n            )\n        else:\n            all_onnx = list(model_root.rglob(\"*.onnx\"))\n            if len(all_onnx) == 1:\n                model_path = all_onnx[0]\n                logger.info(\"Auto-selected ONNX model: %s\", model_path)\n            else:\n                raise FileNotFoundError(\n                    f\"ONNX model not found under {model_root}. Found: {all_onnx}\"\n                )\n\n    logger.info(\"Loading ONNX model: %s\", model_path)\n    session = ort.InferenceSession(\n        str(model_path),\n        sess_options=_ort_session_options(),\n        providers=[\"CPUExecutionProvider\"],\n    )\n\n    os.environ.setdefault(\"OMP_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"MKL_NUM_THREADS\", str(NUM_THREADS))\n    os.environ.setdefault(\"OPENBLAS_NUM_THREADS\", str(NUM_THREADS))\n    return session\n\n\n@functools.lru_cache(maxsize=1)\ndef _load_band_stats() -> dict:\n    \"\"\"Load per-band stats (mean, std, p2, p98) from band_stats.npz.\"\"\"\n    model_root = Path(MODEL_DIR)\n    stats_path = model_root / BAND_STATS_FILENAME\n\n    if not stats_path.exists():\n        matches = list(model_root.rglob(BAND_STATS_FILENAME))\n        if len(matches) >= 1:\n            stats_path = matches[0]\n            if len(matches) > 1:\n                logger.warning(\n                    \"Multiple %s files; using %s\", BAND_STATS_FILENAME, stats_path,\n                )\n\n    if not stats_path.exists():\n        raise FileNotFoundError(\n            f\"band_stats.npz not found under {model_root}.\"\n        )\n\n    data = np.load(stats_path)\n    if \"p2\" not in data.files or \"p98\" not in data.files:\n        raise ValueError(\n            f\"band_stats.npz at {stats_path} missing 'p2'/'p98' \"\n            f\"(found {list(data.files)}).\"\n        )\n    stats = {\n        \"mean\": data[\"mean\"].astype(np.float32),\n        \"std\": data[\"std\"].astype(np.float32),\n        \"p2\": data[\"p2\"].astype(np.float32),\n        \"p98\": data[\"p98\"].astype(np.float32),\n    }\n    for key in (\"mean\", \"std\", \"p2\", \"p98\"):\n        if stats[key].shape != (13,):\n            raise ValueError(\n                f\"band_stats[{key}] shape {stats[key].shape} != (13,)\"\n            )\n    logger.info(\n        \"Loaded band_stats: p2=%s p98=%s\", stats[\"p2\"], stats[\"p98\"],\n    )\n    return stats\n\n\n# ===========================================================================\n# Mosaic helpers (ported from openeo_udp/udf/temporal_mosaic.py)\n# ===========================================================================\n\ndef _compute_clear_masks(scl_stack: np.ndarray, clear_classes: list[int]) -> np.ndarray:\n    \"\"\"Per-scene binary clear masks from SCL (whitelist + morph cleaning).\"\"\"\n    clear = np.isin(scl_stack, clear_classes)\n    struct_erode = ndimage.generate_binary_structure(2, 1)\n    struct_dilate = np.ones((5, 5), dtype=bool)\n\n    for t in range(clear.shape[0]):\n        cloud = ~clear[t]\n        cloud = ndimage.binary_erosion(cloud, structure=struct_erode)\n        cloud = ndimage.binary_dilation(cloud, structure=struct_dilate)\n        labelled, n_features = ndimage.label(cloud)\n        if n_features > 0:\n            sizes = ndimage.sum(cloud, labelled, range(1, n_features + 1))\n            small = np.array([i + 1 for i, s in enumerate(sizes) if s < 4])\n            if len(small) > 0:\n                cloud[np.isin(labelled, small)] = False\n        clear[t] = ~cloud\n    return clear\n\n\ndef _score_scenes(clear_masks: np.ndarray) -> np.ndarray:\n    total = clear_masks.shape[1] * clear_masks.shape[2]\n    return clear_masks.sum(axis=(1, 2)).astype(np.float32) / total\n\n\ndef _slic_segmentation(\n    reference_image: np.ndarray,\n    n_segments: int,\n    compactness: float = 10.0,\n    n_iter: int = 5,\n) -> np.ndarray:\n    \"\"\"Simple SLIC superpixels (k-means with spatial+spectral distance).\"\"\"\n    h, w, _c = reference_image.shape\n    grid_step = max(1, int(np.sqrt(h * w / max(n_segments, 1))))\n    ys = np.arange(grid_step // 2, h, grid_step)\n    xs = np.arange(grid_step // 2, w, grid_step)\n    centres_yx = np.array([(y, x) for y in ys for x in xs], dtype=np.float32)\n    n_k = len(centres_yx)\n    if n_k == 0:\n        return np.zeros((h, w), dtype=np.int32)\n\n    centres_spec = np.array(\n        [reference_image[int(y), int(x)] for y, x in centres_yx],\n        dtype=np.float32,\n    )\n\n    spec_min = reference_image.min()\n    spec_range = reference_image.max() - spec_min\n    if spec_range < 1e-6:\n        spec_range = 1.0\n    ref_norm = (reference_image - spec_min) / spec_range\n    centres_spec_norm = (centres_spec - spec_min) / spec_range\n\n    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)\n    spatial_scale = compactness / grid_step\n\n    labels = np.full((h, w), -1, dtype=np.int32)\n    distances = np.full((h, w), np.inf, dtype=np.float32)\n\n    for _ in range(n_iter):\n        for k in range(n_k):\n            cy, cx = centres_yx[k]\n            cs = centres_spec_norm[k]\n            y0 = max(0, int(cy) - 2 * grid_step)\n            y1 = min(h, int(cy) + 2 * grid_step + 1)\n            x0 = max(0, int(cx) - 2 * grid_step)\n            x1 = min(w, int(cx) + 2 * grid_step + 1)\n\n            patch = ref_norm[y0:y1, x0:x1]\n            d_spec = np.sum((patch - cs[None, None, :]) ** 2, axis=2)\n            d_spatial = (\n                (yy[y0:y1, x0:x1] - cy) ** 2 + (xx[y0:y1, x0:x1] - cx) ** 2\n            ) * (spatial_scale ** 2)\n            d_total = d_spec + d_spatial\n\n            mask = d_total < distances[y0:y1, x0:x1]\n            distances[y0:y1, x0:x1] = np.where(mask, d_total, distances[y0:y1, x0:x1])\n            labels[y0:y1, x0:x1] = np.where(mask, k, labels[y0:y1, x0:x1])\n\n        for k in range(n_k):\n            members = labels == k\n            if np.any(members):\n                centres_yx[k, 0] = yy[members].mean()\n                centres_yx[k, 1] = xx[members].mean()\n                centres_spec_norm[k] = ref_norm[members].mean(axis=0)\n\n    if np.any(labels < 0):\n        labels[labels < 0] = 0\n    return labels\n\n\ndef _assign_clusters_to_scenes(\n    labels: np.ndarray,\n    clear_masks: np.ndarray,\n    scene_order: np.ndarray,\n    clear_thresh: float,\n) -> np.ndarray:\n    h, w = labels.shape\n    scene_assignment = np.full((h, w), -1, dtype=np.int32)\n    n_clusters = labels.max() + 1\n\n    for k in range(n_clusters):\n        member_mask = labels == k\n        n_pixels = member_mask.sum()\n        if n_pixels == 0:\n            continue\n        best_scene = -1\n        best_frac = -1.0\n        for scene_idx in scene_order:\n            frac = clear_masks[scene_idx][member_mask].sum() / n_pixels\n            if frac > best_frac:\n                best_frac = frac\n                best_scene = scene_idx\n        if best_frac >= clear_thresh and best_scene >= 0:\n            scene_assignment[member_mask] = best_scene\n    return scene_assignment\n\n\ndef _hierarchical_fallback(\n    scene_assignment: np.ndarray,\n    clear_masks: np.ndarray,\n    scene_order: np.ndarray,\n    clear_thresh: float,\n    patch_sizes: list[int],\n) -> np.ndarray:\n    h, w = scene_assignment.shape\n    for patch_size in patch_sizes:\n        for y0 in range(0, h, patch_size):\n            for x0 in range(0, w, patch_size):\n                y1 = min(y0 + patch_size, h)\n                x1 = min(x0 + patch_size, w)\n                patch_slice = (slice(y0, y1), slice(x0, x1))\n                unassigned = scene_assignment[patch_slice] < 0\n                if not np.any(unassigned):\n                    continue\n                n_pixels = unassigned.sum()\n                best_scene = -1\n                best_frac = -1.0\n                for scene_idx in scene_order:\n                    clear_patch = clear_masks[scene_idx][y0:y1, x0:x1]\n                    frac = clear_patch[unassigned].sum() / n_pixels\n                    if frac > best_frac:\n                        best_frac = frac\n                        best_scene = scene_idx\n                if best_frac >= clear_thresh and best_scene >= 0:\n                    assign_patch = scene_assignment[patch_slice]\n                    assign_patch[unassigned] = best_scene\n                    scene_assignment[patch_slice] = assign_patch\n\n    still = scene_assignment < 0\n    if np.any(still):\n        ys_u, xs_u = np.where(still)\n        for y, x in zip(ys_u, xs_u):\n            for scene_idx in scene_order:\n                if clear_masks[scene_idx, y, x]:\n                    scene_assignment[y, x] = scene_idx\n                    break\n    return scene_assignment\n\n\ndef _rescue_fill(\n    scene_assignment: np.ndarray,\n    spectral_stack: np.ndarray,\n    scl_stack: np.ndarray,\n    scene_order: np.ndarray,\n    n_rescue: int,\n) -> Tuple[np.ndarray, np.ndarray]:\n    _t, c, h, w = spectral_stack.shape\n    composite = np.zeros((c, h, w), dtype=np.float32)\n    fill_mode = np.zeros((h, w), dtype=np.uint8)\n\n    assigned_mask = scene_assignment >= 0\n    fill_mode[~assigned_mask] = 1\n    if np.any(assigned_mask):\n        ys, xs = np.where(assigned_mask)\n        ss = scene_assignment[assigned_mask]\n        composite[:, ys, xs] = spectral_stack[ss, :, ys, xs].T\n\n    unfilled = scene_assignment < 0\n    if np.any(unfilled):\n        rescue_candidates = scene_order[:n_rescue]\n        uf_ys, uf_xs = np.where(unfilled)\n        for y, x in zip(uf_ys, uf_xs):\n            best_scene = rescue_candidates[0]\n            best_cloud = 999\n            for s in rescue_candidates:\n                scl_val = scl_stack[s, y, x]\n                cloud_score = scl_val if scl_val in (0, 1, 3, 8, 9, 10) else 0\n                if cloud_score < best_cloud:\n                    best_cloud = cloud_score\n                    best_scene = s\n            composite[:, y, x] = spectral_stack[best_scene, :, y, x]\n            fill_mode[y, x] = 1\n    return composite, fill_mode\n\n\ndef _create_temporal_mosaic(\n    spectral_stack: np.ndarray,\n    scl_stack: np.ndarray,\n    params: dict,\n) -> np.ndarray:\n    \"\"\"Cloud-free composite. spectral=(T,13,H,W), scl=(T,H,W) -> (13,H,W).\"\"\"\n    t, _c, h, w = spectral_stack.shape\n\n    scl_int = scl_stack.astype(np.int32)\n    clear_masks = _compute_clear_masks(scl_int, params[\"scl_clear_classes\"])\n    scores = _score_scenes(clear_masks)\n    scene_order = np.argsort(-scores)\n\n    top_n = min(params[\"top_n_scenes\"], t)\n    candidates = scene_order[:top_n]\n\n    # Reference image (median of clear B4,B3,B2,B8 across top candidates + NDVI)\n    ref_bands = []\n    for band_idx in REF_BAND_INDICES:\n        stack = []\n        for s in candidates:\n            masked = np.where(clear_masks[s], spectral_stack[s, band_idx], np.nan)\n            stack.append(masked)\n        ref_bands.append(np.nanmedian(stack, axis=0))\n    reference = np.stack(ref_bands, axis=-1)\n    b8 = reference[:, :, 3].astype(np.float64)\n    b4 = reference[:, :, 0].astype(np.float64)\n    ndvi = np.where((b8 + b4) > 0, (b8 - b4) / (b8 + b4 + 1e-6), 0)\n    reference = np.concatenate([reference, ndvi[:, :, None]], axis=-1)\n    reference = np.nan_to_num(reference, nan=0.0).astype(np.float32)\n\n    n_segments = max(1, (h * w) // (params[\"snic_size_px\"] ** 2))\n    labels = _slic_segmentation(\n        reference,\n        n_segments=n_segments,\n        compactness=params[\"snic_compactness\"],\n        n_iter=5,\n    )\n\n    scene_assignment = _assign_clusters_to_scenes(\n        labels=labels,\n        clear_masks=clear_masks,\n        scene_order=candidates,\n        clear_thresh=params[\"clear_thresh\"],\n    )\n    scene_assignment = _hierarchical_fallback(\n        scene_assignment=scene_assignment,\n        clear_masks=clear_masks,\n        scene_order=candidates,\n        clear_thresh=params[\"clear_thresh\"],\n        patch_sizes=params[\"patch_sizes\"],\n    )\n\n    n_rescue = min(params[\"top_n_rescue\"], t)\n    composite, _fill_mode = _rescue_fill(\n        scene_assignment=scene_assignment,\n        spectral_stack=spectral_stack,\n        scl_stack=scl_int,\n        scene_order=scene_order[:n_rescue],\n        n_rescue=n_rescue,\n    )\n    return composite\n\n\n# ===========================================================================\n# Inference helpers\n# ===========================================================================\n\ndef _normalize_training(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Percentile normalization, mirroring solar_ml.data.normalize_batch.\"\"\"\n    stats = _load_band_stats()\n    mean = stats[\"mean\"]\n    p2 = stats[\"p2\"]\n    p98 = stats[\"p98\"]\n\n    invalid_mask = ~np.isfinite(image_hwc).all(axis=-1)\n\n    image = image_hwc.astype(np.float32, copy=True)\n    for b in range(image.shape[-1]):\n        band = image[:, :, b]\n        nan_mask = ~np.isfinite(band)\n        if nan_mask.any():\n            band[nan_mask] = float(mean[b])\n\n    denom = np.maximum(p98 - p2, 1.0)\n    image_norm = np.clip((image - p2[None, None, :]) / denom[None, None, :], 0.0, 1.0)\n    image_norm = np.nan_to_num(image_norm, nan=0.0, posinf=0.0, neginf=0.0)\n    return image_norm.astype(np.float32), invalid_mask\n\n\ndef _run_inference(\n    session: ort.InferenceSession,\n    image_hwc: np.ndarray,\n    threshold: float,\n) -> tuple[np.ndarray, np.ndarray]:\n    \"\"\"Run ONNX inference. Returns (binary, probs).\"\"\"\n    h, w = image_hwc.shape[:2]\n\n    image_norm, invalid_mask = _normalize_training(image_hwc.astype(np.float32))\n\n    if bool(invalid_mask.all()):\n        return (\n            np.zeros((h, w), dtype=np.uint8),\n            np.zeros((h, w), dtype=np.float32),\n        )\n\n    batch = image_norm[np.newaxis, ...]  # (1, H, W, 13)\n\n    logger.info(\n        \"NORMALIZED input: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        batch.shape, float(batch.min()), float(batch.max()), float(batch.mean()),\n    )\n\n    input_name = session.get_inputs()[0].name\n    probs = session.run(None, {input_name: batch})[0]\n    probs = np.squeeze(probs, axis=(0, -1)).astype(np.float32)\n\n    logger.info(\n        \"MODEL OUTPUT: shape=%s min=%.4f max=%.4f mean=%.4f\",\n        probs.shape, float(probs.min()), float(probs.max()), float(probs.mean()),\n    )\n\n    probs[invalid_mask] = 0.0\n    binary = (probs > threshold).astype(np.uint8)\n    return binary, probs\n\n\n# ===========================================================================\n# OpenEO UDF entry points\n# ===========================================================================\n\ndef _resolve_mosaic_params(context: dict) -> dict:\n    params = {**DEFAULT_MOSAIC_PARAMS}\n    for key in DEFAULT_MOSAIC_PARAMS:\n        if key in context:\n            params[key] = context[key]\n    return params\n\n\ndef apply_metadata(metadata: CollectionMetadata, context: dict) -> CollectionMetadata:\n    \"\"\"Declare the 2-band output schema.\"\"\"\n    return metadata.rename_labels(\n        dimension=\"bands\",\n        target=[\"solar_pv\", \"solar_pv_probability\"],\n    )\n\n\ndef apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:\n    \"\"\"Main UDF entry point: mosaic -> normalize -> ONNX -> 2-band output.\n\n    Input cube dims: (t, bands, y, x) with 14 bands (13 L1C + SCL).\n    Output cube dims: (bands, y, x) with 2 bands.\n    \"\"\"\n    threshold = float(context.get(\"threshold\", DEFAULT_THRESHOLD))\n    mosaic_params = _resolve_mosaic_params(context)\n\n    dims = list(cube.dims)\n    t_dim = next((d for d in dims if d in (\"t\", \"time\")), None)\n    b_dim = next((d for d in dims if d in (\"bands\", \"band\", \"spectral\")), None)\n    if t_dim is None or b_dim is None:\n        raise ValueError(f\"Expected (t, bands, y, x) dimensions, got {dims}\")\n    spatial_dims = [d for d in dims if d not in (t_dim, b_dim)]\n    if len(spatial_dims) != 2:\n        raise ValueError(f\"Expected 2 spatial dims, got {spatial_dims}\")\n    y_dim, x_dim = spatial_dims\n\n    # Transpose to (t, bands, y, x)\n    data = cube.transpose(t_dim, b_dim, y_dim, x_dim).values\n    _t, n_bands, h, w = data.shape\n\n    if n_bands < 14:\n        raise ValueError(\n            f\"Expected >=14 bands (13 L1C + SCL), got {n_bands}. \"\n            f\"Did you forget to merge SCL into the L1C cube?\"\n        )\n\n    spectral = data[:, :13, :, :].astype(np.float32)\n    scl = data[:, 13, :, :]\n\n    # --- Mosaic ---\n    composite = _create_temporal_mosaic(spectral, scl, mosaic_params)  # (13, H, W)\n    logger.info(\n        \"Mosaic done: shape=%s finite_pct=%.1f%%\",\n        composite.shape,\n        100.0 * np.isfinite(composite).mean(),\n    )\n\n    # --- Inference ---\n    image_hwc = np.transpose(composite, (1, 2, 0))  # (H, W, 13)\n    session = _load_session()\n    binary, probs = _run_inference(session, image_hwc, threshold)\n\n    stacked = np.stack(\n        [\n            binary.astype(np.float32),\n            probs.astype(np.float32),\n        ],\n        axis=0,\n    )\n\n    coords: dict = {}\n    if y_dim in cube.coords:\n        coords[y_dim] = cube.coords[y_dim]\n    if x_dim in cube.coords:\n        coords[x_dim] = cube.coords[x_dim]\n\n    return xr.DataArray(\n        stacked,\n        dims=(\"bands\", y_dim, x_dim),\n        coords=coords,\n    )\n"
+              },
+              "result": true
+            }
+          }
+        },
+        "size": [
+          {
+            "dimension": "x",
+            "value": 192,
+            "unit": "px"
+          },
+          {
+            "dimension": "y",
+            "value": 192,
+            "unit": "px"
+          }
+        ]
+      },
+      "result": true
+    }
+  },
+  "id": "solar_pv_detection",
+  "summary": "Solar PV detection (ONNX)",
+  "description": "Sentinel-2 L1C temporal mosaic + ONNX UDF inference. Returns 'solar_pv' (binary) and 'solar_pv_probability' (float).",
+  "default_job_options": {
+    "udf-dependency-archives": [
+      "https://s3.waw3-1.cloudferro.com/project_dependencies/onnx_deps_python311.zip#onnx_deps",
+      "https://s3.waw3-1.cloudferro.com/project_dependencies/apex_pv_rui/solar_pv_rui.zip#onnx_models"
+    ],
+    "executor-memory": "6g",
+    "executor-memoryOverhead": "3g",
+    "python-memory": "disable",
+    "soft-errors": 0.1
+  },
+  "parameters": [
+    {
+      "name": "spatial_extent",
+      "description": "Bounding box dict with west/south/east/north.",
+      "schema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "temporal_extent",
+      "description": "Date range [start, end] (ISO-8601).",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  ]
+}

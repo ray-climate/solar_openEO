@@ -25,7 +25,7 @@ from openeo_udp.process_graph.solar_pv_detection_onnx import (
 # ---- edit here -------------------------------------------------------------
 BACKEND = "https://openeo.dataspace.copernicus.eu"
 PROCESS_ID = "solar_pv_detection"
-OUTPUT_JSON = Path(__file__).resolve().parent / "solar_pv_detection_onnx_udp.json"
+OUTPUT_JSON = Path(__file__).resolve().parent / "solar_pv_detection_udp.json"
 REGISTER = True
 # ---------------------------------------------------------------------------
 
