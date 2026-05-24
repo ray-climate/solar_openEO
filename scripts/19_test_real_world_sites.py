@@ -37,7 +37,8 @@ sys.path.insert(0, str(REPO))
 # --- Paths ---
 MASTER_MANIFEST = REPO / "outputs/final/master_manifest.csv"
 REPACKED_H5 = REPO / "outputs/final/final_dataset_repacked.h5"
-OUTPUT_DIR = REPO / "docs/realworld_test_2026Q1"
+V2_SPLIT_MANIFEST = REPO / "outputs/training_prep/final_v2/split_manifest.csv"
+DEFAULT_OUTPUT_DIR = REPO / "docs/realworld_test_2026Q1"
 
 # --- Test config ---
 BACKEND_URL = "https://openeo.dataspace.copernicus.eu"
@@ -53,13 +54,30 @@ CHIP_SIZE_M = 2560  # 256 px at 10 m
 # Phase 1: site selection
 # ============================================================
 
-def select_sites() -> list[dict]:
-    """Pick 6 sites: 2 small, 2 medium, 2 large.
+def _load_v2_splits() -> dict[str, str]:
+    splits = {}
+    with open(V2_SPLIT_MANIFEST) as f:
+        for r in csv.DictReader(f):
+            splits[r["chip_id"]] = r["split"]
+    return splits
 
-    Stratification keys on `panel_frac` from master_manifest.csv.  Within
-    each tier we prefer geographic diversity (different continents) and
-    `status=EXTRACTED` (i.e. chips we actually have masks for).
+
+def select_sites(n_total: int = 6, unseen_only: bool = False, seed: int = 42) -> list[dict]:
+    """Pick stratified positive sites.
+
+    Stratifies into small/medium/large by `panel_frac` and round-robins by
+    continent within each tier for geographic diversity.
+
+    Tier counts scale with `n_total` (default 6 → 2/2/2; 50 → 20/20/10).
+
+    If `unseen_only`, restricts to chips whose v2 split is `val` or `test`
+    (i.e. never trained on).  Honest real-world evaluation requires this.
     """
+    import random
+    rng = random.Random(seed)
+
+    splits = _load_v2_splits() if unseen_only else {}
+
     rows = []
     with open(MASTER_MANIFEST) as f:
         for r in csv.DictReader(f):
@@ -67,50 +85,65 @@ def select_sites() -> list[dict]:
                 continue
             if r["status"] != "EXTRACTED":
                 continue
+            cid = r["chip_id_str"]
+            if unseen_only and splits.get(cid) not in ("val", "test"):
+                continue
             try:
                 pf = float(r["panel_frac"])
             except (TypeError, ValueError):
                 continue
+            if pf < 0.02:
+                continue
             rows.append({
-                "chip_id": r["chip_id_str"],
-                "col": int(r["chip_col"]),
-                "row": int(r["chip_row"]),
-                "lat": float(r["chip_center_lat"]),
-                "lon": float(r["chip_center_lon"]),
-                "continent": r["continent"],
+                "chip_id":    cid,
+                "col":        int(r["chip_col"]),
+                "row":        int(r["chip_row"]),
+                "lat":        float(r["chip_center_lat"]),
+                "lon":        float(r["chip_center_lon"]),
+                "continent":  r["continent"],
                 "panel_frac": pf,
+                "split":      splits.get(cid, "?"),
             })
 
     # Stratify
-    small = [r for r in rows if 0.02 <= r["panel_frac"] < 0.08]
-    medium = [r for r in rows if 0.20 <= r["panel_frac"] < 0.40]
-    large = [r for r in rows if r["panel_frac"] >= 0.50]
-
-    def pick_diverse(pool, n):
-        # Prefer one from each continent, then fill
-        pool_sorted = sorted(pool, key=lambda r: r["panel_frac"], reverse=True)
-        chosen, seen = [], set()
-        for r in pool_sorted:
-            if r["continent"] not in seen:
-                chosen.append(r); seen.add(r["continent"])
-            if len(chosen) >= n:
-                break
-        for r in pool_sorted:
-            if r in chosen:
-                continue
-            chosen.append(r)
-            if len(chosen) >= n:
-                break
-        return chosen[:n]
+    def in_tier(pf, tier):
+        if tier == "small":  return 0.02 <= pf < 0.10
+        if tier == "medium": return 0.10 <= pf < 0.40
+        if tier == "large":  return pf >= 0.40
+    # Tier counts scale with n_total (default 6 splits 2/2/2; 50 splits 20/20/10)
+    if n_total <= 6:
+        tier_counts = {"small": 2, "medium": 2, "large": 2}
+        half_km = {"small": 2.5, "medium": 2.5, "large": 5.0}
+    else:
+        # weights: 0.4 / 0.4 / 0.2
+        tier_counts = {
+            "small":  int(round(n_total * 0.40)),
+            "medium": int(round(n_total * 0.40)),
+            "large":  n_total - int(round(n_total * 0.40)) - int(round(n_total * 0.40)),
+        }
+        half_km = {"small": 2.5, "medium": 2.5, "large": 5.0}
 
     sites = []
-    for tier, pool, n, half_km in [
-        ("small",  small,  2, 2.5),
-        ("medium", medium, 2, 2.5),
-        ("large",  large,  2, 5.0),
-    ]:
-        for s in pick_diverse(pool, n):
-            sites.append({**s, "tier": tier, "half_size_km": half_km})
+    for tier, n_pick in tier_counts.items():
+        pool = [r for r in rows if in_tier(r["panel_frac"], tier)]
+        rng.shuffle(pool)
+        # group by continent, then round-robin pick for diversity
+        by_cont: dict[str, list] = {}
+        for r in pool:
+            by_cont.setdefault(r["continent"], []).append(r)
+        order = sorted(by_cont.keys(), key=lambda c: -len(by_cont[c]))
+        chosen: list = []
+        while len(chosen) < n_pick:
+            progressed = False
+            for c in order:
+                if by_cont[c]:
+                    chosen.append(by_cont[c].pop()); progressed = True
+                    if len(chosen) >= n_pick:
+                        break
+            if not progressed:
+                break
+        for s in chosen[:n_pick]:
+            sites.append({**s, "tier": tier, "half_size_km": half_km[tier]})
     return sites
 
 
@@ -131,13 +164,8 @@ def aoi_bbox_4326(lat: float, lon: float, half_km: float) -> dict:
 # Phase 2: OpenEO download
 # ============================================================
 
-def download_stack(conn, site: dict, out_dir: Path) -> Path:
-    """Submit OpenEO job for one AOI, wait, save netCDF stack."""
-    nc_path = out_dir / f"{site['chip_id']}_stack.nc"
-    if nc_path.exists():
-        print(f"  [cached] {nc_path.name} ({nc_path.stat().st_size/1e6:.1f} MB)")
-        return nc_path
-
+def _build_job(conn, site: dict):
+    """Construct (but do not start) the OpenEO job for one site."""
     bbox = aoi_bbox_4326(site["lat"], site["lon"], site["half_size_km"])
     s2_l1c = conn.load_collection(
         "SENTINEL2_L1C", spatial_extent=bbox,
@@ -148,41 +176,80 @@ def download_stack(conn, site: dict, out_dir: Path) -> Path:
         temporal_extent=TEMPORAL, bands=["SCL"],
     ).resample_spatial(resolution=10, projection="EPSG:3857")
     merged = s2_l1c.merge_cubes(s2_scl)
-    job = merged.create_job(title=f"rw_{site['chip_id']}", out_format="netCDF")
-    job.start_job()
-    print(f"  [job] {site['chip_id']} ({site['tier']:>6s}, {site['half_size_km']:.1f} km) -> {job.job_id}")
-    return {"site": site, "job": job, "nc_path": nc_path}
+    return merged.create_job(title=f"rw_{site['chip_id']}", out_format="netCDF")
 
 
-def wait_for_jobs(pending: list[dict], out_dir: Path) -> None:
-    """Poll all pending OpenEO jobs in parallel until each completes."""
+def download_all_throttled(conn, sites: list[dict], out_dir: Path,
+                           max_concurrent: int = 25,
+                           poll_sec: int = 20) -> None:
+    """Submit + download S2 stacks with a rolling window so we never exceed
+    CDSE's concurrent-job limit (30 as of 2026-05).
+    """
+    pending = list(sites)            # not yet submitted
+    in_flight: dict[str, dict] = {}  # chip_id -> {site, job, nc_path}
     started = time.time()
-    done: dict[str, bool] = {}
-    while len(done) < len(pending):
-        for p in pending:
-            cid = p["site"]["chip_id"]
-            if cid in done:
+    n_done = 0; n_failed = 0; n_cached = 0
+
+    while pending or in_flight:
+        # Refill submissions up to max_concurrent
+        while pending and len(in_flight) < max_concurrent:
+            s = pending.pop(0)
+            cid = s["chip_id"]
+            nc_path = out_dir / f"{cid}_stack.nc"
+            if nc_path.exists():
+                print(f"  [cached] {cid} ({nc_path.stat().st_size/1e6:.1f} MB)")
+                n_cached += 1
                 continue
-            status = p["job"].status()
+            try:
+                job = _build_job(conn, s)
+                job.start_job()
+            except Exception as exc:
+                print(f"  [{(time.time()-started)/60:5.1f} min] SUBMIT_FAIL {cid}: {exc}")
+                n_failed += 1
+                continue
+            in_flight[cid] = {"site": s, "job": job, "nc_path": nc_path}
+            print(f"  [{(time.time()-started)/60:5.1f} min] [submit] {cid} ({s['tier']:>6s}, {s['half_size_km']:.1f} km) "
+                  f"-> {job.job_id}   (in_flight={len(in_flight)}, pending={len(pending)})")
+
+        # Poll in_flight
+        finished_cids = []
+        for cid, p in list(in_flight.items()):
+            try:
+                status = p["job"].status()
+            except Exception as exc:
+                print(f"  [{(time.time()-started)/60:5.1f} min] POLL_FAIL {cid}: {exc}")
+                continue
             if status == "finished":
-                tmp = out_dir / f"_tmp_{cid}"
-                tmp.mkdir(parents=True, exist_ok=True)
-                p["job"].get_results().download_files(tmp)
-                ncs = list(tmp.glob("*.nc"))
-                if not ncs:
-                    raise FileNotFoundError(f"No netCDF for {cid}")
-                ncs[0].rename(p["nc_path"])
-                for f in tmp.iterdir():
-                    f.unlink()
-                tmp.rmdir()
-                size_mb = p["nc_path"].stat().st_size / 1e6
-                print(f"  [{(time.time()-started)/60:5.1f} min] FINISHED {cid} ({size_mb:.1f} MB)")
-                done[cid] = True
+                try:
+                    tmp = out_dir / f"_tmp_{cid}"
+                    tmp.mkdir(parents=True, exist_ok=True)
+                    p["job"].get_results().download_files(tmp)
+                    ncs = list(tmp.glob("*.nc"))
+                    if not ncs:
+                        raise FileNotFoundError(f"No netCDF for {cid}")
+                    ncs[0].rename(p["nc_path"])
+                    for f in tmp.iterdir():
+                        f.unlink()
+                    tmp.rmdir()
+                    size_mb = p["nc_path"].stat().st_size / 1e6
+                    n_done += 1
+                    print(f"  [{(time.time()-started)/60:5.1f} min] FINISHED {cid} ({size_mb:.1f} MB)  "
+                          f"[done={n_done}, failed={n_failed}, remaining={len(pending)+len(in_flight)-1}]")
+                except Exception as exc:
+                    print(f"  [{(time.time()-started)/60:5.1f} min] DOWNLOAD_FAIL {cid}: {exc}")
+                    n_failed += 1
+                finished_cids.append(cid)
             elif status in ("error", "canceled"):
-                print(f"  [{(time.time()-started)/60:5.1f} min] FAILED   {cid} -> {status}")
-                done[cid] = True
-        if len(done) < len(pending):
-            time.sleep(20)
+                n_failed += 1
+                print(f"  [{(time.time()-started)/60:5.1f} min] FAILED {cid} -> {status}")
+                finished_cids.append(cid)
+        for cid in finished_cids:
+            del in_flight[cid]
+
+        if pending or in_flight:
+            time.sleep(poll_sec)
+    print(f"\nDownload summary: {n_done} done, {n_failed} failed, {n_cached} cached, "
+          f"total {n_done+n_failed+n_cached}")
 
 
 # ============================================================
@@ -291,15 +358,24 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--phase", choices=["select", "download", "infer", "all"],
                         default="all")
+    parser.add_argument("--n-sites", type=int, default=6, help="Total number of sites")
+    parser.add_argument("--unseen-only", action="store_true",
+                        help="Restrict picks to chips in v2 val/test (never trained on)")
+    parser.add_argument("--output-dir", default=None, help="Override output directory")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_DIR
+    if not output_dir.is_absolute():
+        output_dir = REPO / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    sites = select_sites()
-    print(f"\nSelected {len(sites)} sites:")
-    print(f"  {'chip_id':<22} {'tier':<7} {'continent':<10} {'panel_frac':>10}  {'AOI km':>7}  {'lat/lon':<22}")
+    sites = select_sites(n_total=args.n_sites, unseen_only=args.unseen_only, seed=args.seed)
+    label = "unseen (val/test only)" if args.unseen_only else "all positives"
+    print(f"\nSelected {len(sites)} sites from {label}:")
+    print(f"  {'chip_id':<22} {'tier':<7} {'split':<5} {'continent':<10} {'panel_frac':>10}  {'AOI km':>7}  lat/lon")
     for s in sites:
-        print(f"  {s['chip_id']:<22} {s['tier']:<7} {s['continent']:<10} "
+        print(f"  {s['chip_id']:<22} {s['tier']:<7} {s.get('split','?'):<5} {s['continent']:<10} "
               f"{s['panel_frac']:>10.3f}  {2*s['half_size_km']:>5.1f}    "
               f"{s['lat']:>+8.3f}, {s['lon']:>+8.3f}")
 
@@ -311,27 +387,23 @@ def main() -> None:
         import openeo
         print(f"\nConnecting to {BACKEND_URL} (device-code auth if no cached token)...")
         conn = openeo.connect(BACKEND_URL)
-        conn.authenticate_oidc_device()
+        # authenticate_oidc() tries cached refresh token first, falls back to
+        # device-code interactive (and stores the new refresh token on success).
+        conn.authenticate_oidc()
         print("Authenticated.")
-        print(f"\nSubmitting {len(sites)} OpenEO jobs (Feb-Apr 2026)...")
-        pending = []
-        for s in sites:
-            res = download_stack(conn, s, OUTPUT_DIR)
-            if isinstance(res, dict):
-                pending.append(res)
-        if pending:
-            print(f"\nWaiting for {len(pending)} job(s) to finish...")
-            wait_for_jobs(pending, OUTPUT_DIR)
+        print(f"\nSubmitting {len(sites)} OpenEO jobs (Feb-Apr 2026) "
+              f"with rolling window (max_concurrent=25 to respect CDSE limit of 30)...")
+        download_all_throttled(conn, sites, output_dir, max_concurrent=25)
         print("\nAll downloads complete.")
 
     if args.phase in ("infer", "all"):
         print("\nMosaic + inference + render:")
         results = []
         for s in sites:
-            nc = OUTPUT_DIR / f"{s['chip_id']}_stack.nc"
-            results.append(process_site(s, nc, OUTPUT_DIR))
+            nc = output_dir / f"{s['chip_id']}_stack.nc"
+            results.append(process_site(s, nc, output_dir))
         ok = [r for r in results if r.get("status") == "ok"]
-        print(f"\n{len(ok)}/{len(sites)} sites processed. PNGs in {OUTPUT_DIR.relative_to(REPO)}/")
+        print(f"\n{len(ok)}/{len(sites)} sites processed. PNGs in {output_dir.relative_to(REPO)}/")
 
 
 if __name__ == "__main__":
