@@ -23,13 +23,14 @@ HTML_TEMPLATE = """<!doctype html>
 <title>Solar PV Review Gallery</title>
 <style>
   :root {
-    --keep:   #2c8a3e;
-    --reject: #b53030;
-    --skip:   #5a6473;
-    --bg:     #1f242c;
-    --panel:  #2b313a;
-    --text:   #e6ebf2;
-    --muted:  #9aa3b0;
+    --keep:     #2c8a3e;
+    --reject:   #b53030;
+    --negative: #2e6fbf;
+    --skip:     #5a6473;
+    --bg:       #1f242c;
+    --panel:    #2b313a;
+    --text:     #e6ebf2;
+    --muted:    #9aa3b0;
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
@@ -39,9 +40,10 @@ HTML_TEMPLATE = """<!doctype html>
            padding:10px 16px; border-bottom:1px solid #444;
            display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
   header .progress { font-weight:600; font-size:15px; }
-  header .progress .keep   { color:var(--keep);   }
-  header .progress .reject { color:var(--reject); }
-  header .progress .skip   { color:var(--skip);   }
+  header .progress .keep     { color:var(--keep);     }
+  header .progress .reject   { color:var(--reject);   }
+  header .progress .negative { color:var(--negative); }
+  header .progress .skip     { color:var(--skip);     }
   header button {
     background:#3a4150; color:var(--text); border:1px solid #555;
     padding:6px 12px; border-radius:4px; cursor:pointer; font-size:13px;
@@ -58,10 +60,11 @@ HTML_TEMPLATE = """<!doctype html>
   .meta .chip-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                    font-weight:600; font-size:15px; }
   .meta .badge { padding:3px 10px; border-radius:4px; font-weight:600; font-size:12px; }
-  .meta .badge.keep   { background:var(--keep);   color:white; }
-  .meta .badge.reject { background:var(--reject); color:white; }
-  .meta .badge.skip   { background:var(--skip);   color:white; }
-  .meta .badge.unrev  { background:#555;          color:white; }
+  .meta .badge.keep     { background:var(--keep);     color:white; }
+  .meta .badge.reject   { background:var(--reject);   color:white; }
+  .meta .badge.negative { background:var(--negative); color:white; }
+  .meta .badge.skip     { background:var(--skip);     color:white; }
+  .meta .badge.unrev    { background:#555;            color:white; }
   .meta .kv { color:var(--muted); }
   .meta .kv b { color:var(--text); }
   img.diag { width:100%; height:auto; display:block;
@@ -73,11 +76,12 @@ HTML_TEMPLATE = """<!doctype html>
     transition: transform 0.05s;
   }
   .actions button:active { transform: scale(0.97); }
-  .actions .b-keep   { background:var(--keep);   }
-  .actions .b-reject { background:var(--reject); }
-  .actions .b-skip   { background:var(--skip);   }
+  .actions .b-keep     { background:var(--keep);     }
+  .actions .b-reject   { background:var(--reject);   }
+  .actions .b-negative { background:var(--negative); }
+  .actions .b-skip     { background:var(--skip);     }
   .actions .b-prev,
-  .actions .b-next   { background:#3a4150; border:1px solid #555; color:var(--text); }
+  .actions .b-next     { background:#3a4150; border:1px solid #555; color:var(--text); }
   .nav-hint { color:var(--muted); font-size:12px; text-align:center; margin-top:4px; }
   .empty { text-align:center; padding:60px; color:var(--muted); font-size:16px; }
   a, a:visited { color:#7eb8ff; }
@@ -92,6 +96,8 @@ HTML_TEMPLATE = """<!doctype html>
     &nbsp;
     <span class="reject">✗ <span id="prog-reject">0</span></span>
     &nbsp;
+    <span class="negative">⊕ <span id="prog-negative">0</span></span>
+    &nbsp;
     <span class="skip">↷ <span id="prog-skip">0</span></span>
   </span>
   <label>Filter:
@@ -100,6 +106,7 @@ HTML_TEMPLATE = """<!doctype html>
       <option value="unreviewed">unreviewed only</option>
       <option value="keep">keep</option>
       <option value="reject">reject</option>
+      <option value="negative">→ negative</option>
       <option value="skip">skipped</option>
     </select>
   </label>
@@ -145,18 +152,20 @@ function applyFilter() {
 
 function updateProgress() {
   const total = manifest.chips.length;
-  let keep = 0, reject = 0, skip = 0;
+  let keep = 0, reject = 0, negative = 0, skip = 0;
   for (const c of manifest.chips) {
     const d = decisions[c.chip_id]?.decision;
-    if (d === "keep")   keep++;
-    else if (d === "reject") reject++;
-    else if (d === "skip")   skip++;
+    if (d === "keep")          keep++;
+    else if (d === "reject")   reject++;
+    else if (d === "negative") negative++;
+    else if (d === "skip")     skip++;
   }
-  document.getElementById("prog-total").textContent  = total;
-  document.getElementById("prog-cur").textContent    = keep + reject + skip;
-  document.getElementById("prog-keep").textContent   = keep;
-  document.getElementById("prog-reject").textContent = reject;
-  document.getElementById("prog-skip").textContent   = skip;
+  document.getElementById("prog-total").textContent    = total;
+  document.getElementById("prog-cur").textContent      = keep + reject + negative + skip;
+  document.getElementById("prog-keep").textContent     = keep;
+  document.getElementById("prog-reject").textContent   = reject;
+  document.getElementById("prog-negative").textContent = negative;
+  document.getElementById("prog-skip").textContent     = skip;
 }
 
 function fmt(v, digits=3) {
@@ -177,9 +186,10 @@ function render() {
   const chip = manifest.chips[order[cursor]];
   const dec  = decisions[chip.chip_id] || {};
   const badgeClass = dec.decision || "unrev";
-  const badgeText  = dec.decision === "keep"   ? "✓ Keep"
-                   : dec.decision === "reject" ? "✗ Reject"
-                   : dec.decision === "skip"   ? "↷ Skip"
+  const badgeText  = dec.decision === "keep"     ? "✓ Keep"
+                   : dec.decision === "reject"   ? "✗ Reject"
+                   : dec.decision === "negative" ? "⊕ → Negative"
+                   : dec.decision === "skip"     ? "↷ Skip"
                    : "unreviewed";
 
   view.innerHTML = `
@@ -197,14 +207,19 @@ function render() {
     </div>
     <img class="diag" src="${chip.png}" alt="${chip.chip_id}">
     <div class="actions">
-      <button class="b-prev"   onclick="navigate(-1)">← Prev</button>
-      <button class="b-keep"   onclick="decide('keep')"  >✓ Keep (1)</button>
-      <button class="b-reject" onclick="decide('reject')">✗ Reject (2)</button>
-      <button class="b-skip"   onclick="decide('skip')"  >↷ Skip (3)</button>
-      <button class="b-next"   onclick="navigate(1)">Next →</button>
+      <button class="b-prev"     onclick="navigate(-1)">← Prev</button>
+      <button class="b-keep"     onclick="decide('keep')"    >✓ Keep (1)</button>
+      <button class="b-reject"   onclick="decide('reject')"  >✗ Reject (2)</button>
+      <button class="b-negative" onclick="decide('negative')">⊕ → Negative (3)</button>
+      <button class="b-skip"     onclick="decide('skip')"    >↷ Skip (4)</button>
+      <button class="b-next"     onclick="navigate(1)">Next →</button>
     </div>
     <div class="nav-hint">
-      Shortcuts: <b>1</b>=Keep, <b>2</b>=Reject, <b>3</b>=Skip, <b>←</b>/<b>→</b>=Prev/Next, <b>U</b>=jump to next unreviewed
+      Shortcuts: <b>1</b>=Keep · <b>2</b>=Reject · <b>3</b>=→ Negative · <b>4</b>=Skip · <b>←</b>/<b>→</b>=Prev/Next · <b>U</b>=jump to next unreviewed<br>
+      <b>Keep</b>: GT correct (model retrained on these, oversampled if Dice was low). &nbsp;
+      <b>Reject</b>: drop chip entirely (e.g. bad imagery). &nbsp;
+      <b>→ Negative</b>: imagery has no panels at labeled spot — use as hard negative. &nbsp;
+      <b>Skip</b>: come back later (treated as <i>keep with current mask</i> if exported).
     </div>
   `;
 }
@@ -263,7 +278,7 @@ function importCSV(file) {
       const chip_id  = row[0].trim();
       const decision = row[1].trim();
       const ts       = (row[2] || new Date().toISOString()).trim();
-      if (["keep", "reject", "skip"].includes(decision)) {
+      if (["keep", "reject", "negative", "skip"].includes(decision)) {
         decisions[chip_id] = { decision, ts };
         n++;
       }
@@ -284,9 +299,10 @@ function clearAll() {
 
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input,select,textarea")) return;
-  if (e.key === "1") { decide("keep");   e.preventDefault(); }
-  if (e.key === "2") { decide("reject"); e.preventDefault(); }
-  if (e.key === "3") { decide("skip");   e.preventDefault(); }
+  if (e.key === "1") { decide("keep");     e.preventDefault(); }
+  if (e.key === "2") { decide("reject");   e.preventDefault(); }
+  if (e.key === "3") { decide("negative"); e.preventDefault(); }
+  if (e.key === "4") { decide("skip");     e.preventDefault(); }
   if (e.key === "ArrowLeft")  { navigate(-1); e.preventDefault(); }
   if (e.key === "ArrowRight") { navigate( 1); e.preventDefault(); }
   if (e.key === "u" || e.key === "U") { jumpToNextUnreviewed(); e.preventDefault(); }
