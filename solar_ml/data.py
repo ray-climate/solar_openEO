@@ -558,13 +558,16 @@ class H5SegmentationSequence(tf.keras.utils.Sequence):
         h5 = self._get_h5()
         batch_indices = np.asarray([int(record["index"]) for record in batch_records], dtype=np.int64)
 
-        # h5py fancy indexing is most efficient and reliable with monotonically increasing indices.
-        order = np.argsort(batch_indices)
-        restore_order = np.argsort(order)
-        sorted_indices = batch_indices[order]
-
-        images_chw = h5["images"][sorted_indices].astype(np.float32)[restore_order]
-        masks_hw = h5["masks"][sorted_indices].astype(np.float32)[restore_order]
+        # h5py fancy indexing requires STRICTLY increasing indices (no duplicates).
+        # When the manifest contains duplicate rows (e.g. hard-mining via row
+        # replication), the batch can carry duplicate indices. Dedupe + reverse-
+        # map so each H5 read sees unique sorted indices, then expand back to
+        # batch order using np.unique's inverse mapping.
+        unique_indices, inverse = np.unique(batch_indices, return_inverse=True)
+        images_chw_u = h5["images"][unique_indices].astype(np.float32)
+        masks_hw_u   = h5["masks"][unique_indices].astype(np.float32)
+        images_chw = images_chw_u[inverse]
+        masks_hw   = masks_hw_u[inverse]
 
         images_hwc = np.transpose(images_chw, (0, 2, 3, 1))
         images_hwc = self._normalize_batch(images_hwc).astype(np.float32, copy=False)

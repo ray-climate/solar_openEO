@@ -6,7 +6,7 @@
 #SBATCH --job-name=exp_round3_r101_reviewed_smoke
 #SBATCH -o /gws/ssde/j25b/gbov/solar_openEO/slurm_logs/%x_%j.out
 #SBATCH -e /gws/ssde/j25b/gbov/solar_openEO/slurm_logs/%x_%j.err
-#SBATCH --time=02:30:00
+#SBATCH --time=02:00:00
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
