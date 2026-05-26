@@ -54,13 +54,55 @@ def tier_for(panel_frac: float) -> str:
     return "large"
 
 
+def _load_model_with_override(weights_override: str | None):
+    """Load the registry's model definition but optionally swap in different weights.
+
+    Returns (model, band_stats, registry, thr).
+    """
+    from openeo_udp.udf.solar_pv_inference import (
+        _get_model_and_stats, _load_registry, _build_model,
+        _load_weights_compat, _load_band_stats,
+    )
+    if not weights_override:
+        m, bs, reg = _get_model_and_stats()
+        return m, bs, reg, float(reg.get("threshold", 0.85))
+    # Build model from registry config, then load alternate weights.
+    reg = _load_registry()
+    m = _build_model(reg)
+    _load_weights_compat(m, Path(weights_override))
+    # band_stats path comes from the registry too (we keep the same v2 stats)
+    stats_path = REPO / reg["band_stats_local"]
+    bs = _load_band_stats(stats_path)
+    print(f"Loaded weights from override: {weights_override}", flush=True)
+    print(f"Band stats from: {stats_path}", flush=True)
+    return m, bs, reg, float(reg.get("threshold", 0.85))
+
+
 def main() -> None:
+    import argparse
+    global OUT_CSV
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--weights", default=None,
+                    help="Override the weights path (default: use model_registry.yaml).")
+    ap.add_argument("--out", default=str(OUT_CSV),
+                    help="Output CSV path (default: docs/audit_30k_h5.csv).")
+    args = ap.parse_args()
+    OUT_CSV = Path(args.out)
+
     master = load_master()
     splits = load_v2_splits()
 
-    from openeo_udp.udf.solar_pv_inference import _get_model_and_stats, normalize_zscore
-    model, band_stats, registry = _get_model_and_stats()
-    thr = float(registry.get("threshold", 0.85))
+    from openeo_udp.udf.solar_pv_inference import normalize_zscore
+    try:
+        model, band_stats, registry, thr = _load_model_with_override(args.weights)
+    except (ImportError, AttributeError):
+        # Older inference module without the helpers — fall back to default flow
+        from openeo_udp.udf.solar_pv_inference import _get_model_and_stats
+        model, band_stats, registry = _get_model_and_stats()
+        thr = float(registry.get("threshold", 0.85))
+        if args.weights:
+            print(f"WARN: registry helpers unavailable; cannot override weights "
+                  f"(requested: {args.weights}). Using registry default.", flush=True)
     print(f"Loaded model: backbone={registry['backbone']}  threshold={thr}")
     print(f"H5 path: {H5.relative_to(REPO)}")
     print(f"Master manifest: {len(master):,} rows  |  v2 splits: {len(splits):,}")
