@@ -145,6 +145,7 @@ def _parse_result(info: dict) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 TIMESERIES_PCT_DIR = REPO / "outputs/fp_classifier/timeseries_pct"
 PCTS = [10, 25, 50, 75, 90]
+GRID_DEG = 5   # 2D spatial blocking cell size for compact chunks
 
 
 def _monthly_index_ic(fc, window_start, n_months):
@@ -224,13 +225,15 @@ def extract_percentiles_gee(polygons_gpkg: Path = POLYGONS_GPKG,
     for (ws, we), grp in window_groups:
         nm = _n_months(ws, we)
         # Spatially sort within the window so each chunk is geographically
-        # COMPACT. Scattered chunks force the monthly composite to load S2 over
-        # a huge bbox -> GEE memory blowup. Snap to a 1deg grid then order by
-        # (lat_cell, lon_cell) so consecutive polygons are neighbours.
+        # COMPACT IN BOTH LAT AND LON. Scattered chunks force the monthly
+        # composite to load S2 over a huge bbox -> GEE memory blowup. A
+        # latitude-only sort still lets a dense band span all longitudes, so
+        # we block by a coarse 2D grid (5deg cells): all polygons in a cell
+        # are consecutive, bounding each chunk's span to ~one cell.
         grp = grp.copy()
-        grp["_latc"] = (grp["lat"] // 1).astype(int)
-        grp["_lonc"] = (grp["lon"] // 1).astype(int)
-        grp = grp.sort_values(["_latc", "_lonc"]).reset_index(drop=True)
+        grp["_latb"] = (grp["lat"] // GRID_DEG).astype(int)
+        grp["_lonb"] = (grp["lon"] // GRID_DEG).astype(int)
+        grp = grp.sort_values(["_latb", "_lonb", "lat", "lon"]).reset_index(drop=True)
         n_chunks = (len(grp) + chunk_size - 1) // chunk_size
         for ci in range(n_chunks):
             sub = grp.iloc[ci * chunk_size:(ci + 1) * chunk_size]
