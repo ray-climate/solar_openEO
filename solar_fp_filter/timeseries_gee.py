@@ -172,7 +172,13 @@ def _monthly_index_ic(fc, window_start, n_months):
 
 
 def _reduce_percentiles(fc, ic):
-    red = ee.Reducer.percentile(PCTS)
+    # Histogram-based percentile (bounded memory). The exact reducer holds
+    # every pixel and blows GEE's memory limit on large polygons; capping
+    # maxBuckets/maxRaw forces the histogram approximation, which is plenty
+    # accurate for NDVI/NDBI percentiles and keeps memory bounded regardless
+    # of polygon size.
+    red = ee.Reducer.percentile(PCTS, maxBuckets=200, minBucketWidth=0.005,
+                                maxRaw=1000)
 
     def per_img(img):
         r = img.reduceRegions(collection=fc, reducer=red, scale=10)
@@ -217,7 +223,14 @@ def extract_percentiles_gee(polygons_gpkg: Path = POLYGONS_GPKG,
     t0 = time.time(); n_chunks_done = 0; n_rows_total = 0
     for (ws, we), grp in window_groups:
         nm = _n_months(ws, we)
-        grp = grp.reset_index(drop=True)
+        # Spatially sort within the window so each chunk is geographically
+        # COMPACT. Scattered chunks force the monthly composite to load S2 over
+        # a huge bbox -> GEE memory blowup. Snap to a 1deg grid then order by
+        # (lat_cell, lon_cell) so consecutive polygons are neighbours.
+        grp = grp.copy()
+        grp["_latc"] = (grp["lat"] // 1).astype(int)
+        grp["_lonc"] = (grp["lon"] // 1).astype(int)
+        grp = grp.sort_values(["_latc", "_lonc"]).reset_index(drop=True)
         n_chunks = (len(grp) + chunk_size - 1) // chunk_size
         for ci in range(n_chunks):
             sub = grp.iloc[ci * chunk_size:(ci + 1) * chunk_size]
