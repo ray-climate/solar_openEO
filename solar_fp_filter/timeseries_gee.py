@@ -148,62 +148,73 @@ PCTS = [10, 25, 50, 75, 90]
 GRID_DEG = 5   # 2D spatial blocking cell size for compact chunks
 
 
-def _monthly_index_ic(fc, window_start, n_months):
+_PCT_PROPS = [f"NDVI_p{p}" for p in PCTS] + [f"NDBI_p{p}" for p in PCTS]
+
+
+def _percentile_perfeature(fc, window_start, n_months):
+    """Per-FEATURE percentile extraction (scatter-proof).
+
+    The global-composite + reduceRegions approach blows GEE's memory limit
+    when a chunk's polygons are geographically scattered (the composite is
+    forced over a huge bbox). Instead, map over features: each polygon
+    builds monthly index composites clipped to ITS OWN neighbourhood, so
+    memory is bounded per polygon regardless of how scattered the chunk is.
+
+    Returns an FC where each feature carries length-n_months arrays for each
+    NDVI/NDBI percentile (in month order), expanded to long format client-side.
+    """
     months = ee.List.sequence(0, n_months - 1)
     base = ee.Date(window_start)
-    empty = ee.Image.constant([0, 0]).rename(["NDVI", "NDBI"]) \
+    empty = ee.Image.constant([0] * len(_PCT_PROPS)).rename(_PCT_PROPS) \
         .updateMask(ee.Image.constant(0)).toFloat()
+    red = ee.Reducer.percentile(PCTS, maxBuckets=200, minBucketWidth=0.005, maxRaw=1000)
 
-    def make(m):
-        s = base.advance(m, "month"); e = s.advance(1, "month")
-        coll = (ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
-                .filterBounds(fc).filterDate(s, e)
-                .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", MAX_SCENE_CLOUD_PCT))
-                .map(_mask_qa60).select(["B4", "B8", "B11"]))
-        comp = coll.median()
+    def per_feature(feat):
+        gb = feat.geometry().buffer(50)
 
-        def idx(img):
-            ndvi = img.normalizedDifference(["B8", "B4"]).rename("NDVI")
-            ndbi = img.normalizedDifference(["B11", "B8"]).rename("NDBI")
-            return ndvi.addBands(ndbi)
-        out = ee.Image(ee.Algorithms.If(coll.size().gt(0), idx(comp), empty))
-        return out.rename(["NDVI", "NDBI"]).set("month", s.format("YYYY-MM"))
+        def mo(m):
+            s = base.advance(m, "month"); e = s.advance(1, "month")
+            coll = (ee.ImageCollection("COPERNICUS/S2_HARMONIZED")
+                    .filterBounds(gb).filterDate(s, e)
+                    .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", MAX_SCENE_CLOUD_PCT))
+                    .map(_mask_qa60).select(["B4", "B8", "B11"]))
 
-    return ee.ImageCollection(months.map(make))
+            def idx(c):
+                ndvi = c.normalizedDifference(["B8", "B4"]).rename("NDVI")
+                ndbi = c.normalizedDifference(["B11", "B8"]).rename("NDBI")
+                return ndvi.addBands(ndbi)
+            img = ee.Image(ee.Algorithms.If(coll.size().gt(0), idx(coll.median()), empty))
+            st = img.reduceRegion(reducer=red, geometry=feat.geometry(),
+                                  scale=10, maxPixels=1e8, bestEffort=True)
+            # one feature per month carrying the percentile values + month
+            props = {p: st.get(p) for p in _PCT_PROPS}
+            props["month"] = s.format("YYYY-MM")
+            return ee.Feature(None, props)
 
+        stats = ee.FeatureCollection(months.map(mo))
+        out = {p: stats.aggregate_array(p) for p in _PCT_PROPS}
+        out["months"] = stats.aggregate_array("month")
+        out["sample_id"] = feat.get("sample_id")
+        return ee.Feature(None, out)
 
-def _reduce_percentiles(fc, ic):
-    # Histogram-based percentile (bounded memory). The exact reducer holds
-    # every pixel and blows GEE's memory limit on large polygons; capping
-    # maxBuckets/maxRaw forces the histogram approximation, which is plenty
-    # accurate for NDVI/NDBI percentiles and keeps memory bounded regardless
-    # of polygon size.
-    red = ee.Reducer.percentile(PCTS, maxBuckets=200, minBucketWidth=0.005,
-                                maxRaw=1000)
-
-    def per_img(img):
-        r = img.reduceRegions(collection=fc, reducer=red, scale=10)
-        return r.map(lambda f: f.set("month", img.get("month")))
-    flat = ic.map(per_img).flatten()
-    cols = ["sample_id", "month"] + \
-           [f"NDVI_p{p}" for p in PCTS] + [f"NDBI_p{p}" for p in PCTS]
-    return flat.select(propertySelectors=cols, retainGeometry=False)
+    return fc.map(per_feature).select(
+        ["sample_id", "months"] + _PCT_PROPS, retainGeometry=False)
 
 
 def _parse_pct_result(info: dict) -> pd.DataFrame:
-    pcols = [f"NDVI_p{p}" for p in PCTS] + [f"NDBI_p{p}" for p in PCTS]
+    """Expand the per-feature arrays into long format (one row per month)."""
     rows = []
     for feat in info.get("features", []):
         p = feat.get("properties", {})
-        sid = p.get("sample_id"); month = p.get("month")
-        if sid is None or month is None:
+        sid = p.get("sample_id"); months = p.get("months")
+        if sid is None or not months:
             continue
-        if all(p.get(c) is None for c in pcols):
-            continue
-        row = {"sample_id": sid, "month": month}
-        for c in pcols:
-            row[c] = p.get(c)
-        rows.append(row)
+        arrs = {c: p.get(c) or [] for c in _PCT_PROPS}
+        for i, month in enumerate(months):
+            vals = {c: (arrs[c][i] if i < len(arrs[c]) else None) for c in _PCT_PROPS}
+            if all(v is None for v in vals.values()):
+                continue
+            rows.append({"sample_id": sid, "month": month, **vals})
     return pd.DataFrame(rows)
 
 
@@ -224,36 +235,30 @@ def extract_percentiles_gee(polygons_gpkg: Path = POLYGONS_GPKG,
     t0 = time.time(); n_chunks_done = 0; n_rows_total = 0
     for (ws, we), grp in window_groups:
         nm = _n_months(ws, we)
-        # Spatially sort within the window so each chunk is geographically
-        # COMPACT IN BOTH LAT AND LON. Scattered chunks force the monthly
-        # composite to load S2 over a huge bbox -> GEE memory blowup. A
-        # latitude-only sort still lets a dense band span all longitudes, so
-        # we block by a coarse 2D grid (5deg cells): all polygons in a cell
-        # are consecutive, bounding each chunk's span to ~one cell.
-        grp = grp.copy()
-        grp["_latb"] = (grp["lat"] // GRID_DEG).astype(int)
-        grp["_lonb"] = (grp["lon"] // GRID_DEG).astype(int)
-        grp = grp.sort_values(["_latb", "_lonb", "lat", "lon"]).reset_index(drop=True)
+        # Per-feature extraction is scatter-proof (each polygon clips to its
+        # own neighbourhood), so NO spatial sorting is needed -- flat-chunk in
+        # file order. chunk_size is bounded only by total per-request work.
+        grp = grp.reset_index(drop=True)
         n_chunks = (len(grp) + chunk_size - 1) // chunk_size
         for ci in range(n_chunks):
             sub = grp.iloc[ci * chunk_size:(ci + 1) * chunk_size]
-            tag = f"{ws[:7]}_to_{we[:7]}_chunk{ci:03d}"
+            tag = f"{ws[:7]}_to_{we[:7]}_chunk{ci:04d}"
             out_pq = out_dir / f"{tag}.parquet"
             if out_pq.exists():
                 print(f"  [skip-existing] {tag}", flush=True); n_chunks_done += 1; continue
             fc = _chunk_to_fc(sub)
-            ic = _monthly_index_ic(fc, ws, nm)
-            result = _reduce_percentiles(fc, ic)
+            result = _percentile_perfeature(fc, ws, nm)
             t_chunk = time.time()
             try:
                 info = _getinfo_with_retry(result)
             except Exception as e:
-                print(f"  CHUNK_FAIL {tag}: {str(e)[:140]}", flush=True); continue
+                print(f"  CHUNK_FAIL {tag}: {str(e)[:120]}", flush=True); continue
             df = _parse_pct_result(info)
             df.to_parquet(out_pq, index=False)
             n_chunks_done += 1; n_rows_total += len(df)
-            print(f"  [{(time.time()-t0)/60:5.1f}m] {tag}: {len(sub)} polys x {nm}mo -> "
-                  f"{len(df):,} rows in {time.time()-t_chunk:.1f}s [chunks={n_chunks_done}]", flush=True)
+            sp = f"lat[{sub.lat.min():.0f},{sub.lat.max():.0f}]lon[{sub.lon.min():.0f},{sub.lon.max():.0f}]"
+            print(f"  [{(time.time()-t0)/60:5.1f}m] {tag} {sp}: {len(sub)}x{nm}mo -> "
+                  f"{len(df):,} rows {time.time()-t_chunk:.1f}s [done={n_chunks_done}]", flush=True)
     print(f"\n=== Percentile extraction complete === chunks={n_chunks_done} "
           f"rows={n_rows_total:,} elapsed={(time.time()-t0)/60:.1f}m", flush=True)
 
