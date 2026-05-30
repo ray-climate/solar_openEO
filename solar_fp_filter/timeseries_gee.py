@@ -184,10 +184,14 @@ def _percentile_perfeature(fc, window_start, n_months):
                 ndbi = c.normalizedDifference(["B11", "B8"]).rename("NDBI")
                 return ndvi.addBands(ndbi)
             img = ee.Image(ee.Algorithms.If(coll.size().gt(0), idx(coll.median()), empty))
-            st = img.reduceRegion(reducer=red, geometry=feat.geometry(),
-                                  scale=10, maxPixels=1e8, bestEffort=True)
-            # one feature per month carrying the percentile values + month
-            props = {p: st.get(p) for p in _PCT_PROPS}
+            st = ee.Dictionary(img.reduceRegion(
+                reducer=red, geometry=feat.geometry(),
+                scale=10, maxPixels=1e8, bestEffort=True))
+            # When a month is fully masked, reduceRegion omits the percentile
+            # keys -> st.get(key) would throw. Guard with contains() and emit a
+            # sentinel (-9999) that the parser converts to NaN.
+            props = {p: ee.Algorithms.If(st.contains(p), st.get(p), -9999)
+                     for p in _PCT_PROPS}
             props["month"] = s.format("YYYY-MM")
             return ee.Feature(None, props)
 
@@ -211,7 +215,11 @@ def _parse_pct_result(info: dict) -> pd.DataFrame:
             continue
         arrs = {c: p.get(c) or [] for c in _PCT_PROPS}
         for i, month in enumerate(months):
-            vals = {c: (arrs[c][i] if i < len(arrs[c]) else None) for c in _PCT_PROPS}
+            vals = {}
+            for c in _PCT_PROPS:
+                v = arrs[c][i] if i < len(arrs[c]) else None
+                # -9999 sentinel = fully-masked month -> NaN
+                vals[c] = None if (v is None or v == -9999) else v
             if all(v is None for v in vals.values()):
                 continue
             rows.append({"sample_id": sid, "month": month, **vals})
