@@ -242,7 +242,12 @@ def extract_percentiles_gee(polygons_gpkg: Path = POLYGONS_GPKG,
     window_groups = list(gdf.groupby(["window_start", "window_end"], sort=False))
     t0 = time.time(); n_chunks_done = 0; n_rows_total = 0
     for (ws, we), grp in window_groups:
-        nm = _n_months(ws, we)
+        # features.py truncates every sample to its last WINDOW_MONTHS=12 months,
+        # so extracting the earlier months of the 24-month transition windows is
+        # pure waste (and the slow/memory-heavy part). Pull only the LAST 12
+        # months of each window: same features, ~half the cost, fewer mem fails.
+        eff_start = f"{int(we[:4]) - 1}-{we[5:]}"   # window_end minus 12 months
+        nm = 12
         # Per-feature extraction is scatter-proof (each polygon clips to its
         # own neighbourhood), so NO spatial sorting is needed -- flat-chunk in
         # file order. chunk_size is bounded only by total per-request work.
@@ -255,7 +260,7 @@ def extract_percentiles_gee(polygons_gpkg: Path = POLYGONS_GPKG,
             if out_pq.exists():
                 print(f"  [skip-existing] {tag}", flush=True); n_chunks_done += 1; continue
             fc = _chunk_to_fc(sub)
-            result = _percentile_perfeature(fc, ws, nm)
+            result = _percentile_perfeature(fc, eff_start, nm)
             t_chunk = time.time()
             try:
                 info = _getinfo_with_retry(result)
