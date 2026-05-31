@@ -40,14 +40,13 @@ GEE_BANDS = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 # Raise toward 0.5 for more aggressive FP removal at the expense of recall.
 KEEP_THRESHOLD = 0.20
 
-# Abstain-on-large safeguard: never DELETE a contiguous detection bigger than
-# this (pixels @10m ~ 0.5 km^2). Real utility-scale PV plants are large and
-# contiguous; the temporal filter's failures (train/serve geometry mismatch)
-# fall hardest on exactly these big plants. The FPs we target (greenhouses,
-# bright roofs, small reflective surfaces) are small-to-medium, so capping the
-# filter to sub-threshold blobs preserves FP removal while guaranteeing a
-# multi-km^2 plant is never silently erased. Set to None to disable.
-ABSTAIN_ABOVE_PX = 5000
+# Abstain-on-large safeguard: optionally never DELETE a contiguous detection
+# bigger than this. DISABLED by default (None) — the 88-site analysis showed a
+# flat size-abstain protects ~65% of false-positive pixel area (FP and TP blob
+# sizes fully overlap, so size alone can't separate them). The shipped filter
+# is the plain mean classifier at KEEP_THRESHOLD; abstain remains available as
+# an opt-in param for callers who want it.
+ABSTAIN_ABOVE_PX = None
 
 
 # --------------------------------------------------------------------------
