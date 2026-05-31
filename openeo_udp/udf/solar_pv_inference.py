@@ -310,7 +310,7 @@ def predict_chip(
     if model is None or band_stats is None or registry is None:
         model, band_stats, registry = _get_model_and_stats(context)
 
-    threshold = float(registry.get("threshold", 0.80))
+    threshold = float(registry.get("threshold", 0.60))
     single = image.ndim == 3
     if single:
         image = image[np.newaxis, ...]
@@ -419,7 +419,7 @@ def apply_datacube(cube, context: dict) -> "XarrayDataCube":
 
     # Run inference
     model, band_stats, registry = _get_model_and_stats(context)
-    threshold = float(context.get("threshold", registry.get("threshold", 0.80)))
+    threshold = float(context.get("threshold", registry.get("threshold", 0.60)))
 
     single = image.ndim == 3
     if single:

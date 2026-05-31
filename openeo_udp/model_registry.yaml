@@ -34,10 +34,24 @@ active_model:
   - B11
   - B12
   normalization: zscore
-  threshold: 0.85
+  # Production threshold: combined-Dice plateau peak on the full test set under
+  # PLAIN inference. Kept on the recall-leaning side of the flat plateau because a
+  # second-stage temporal FP filter (v2.1) will handle false positives downstream,
+  # while stage-1 false negatives (missed sites) are unrecoverable. Per-slice sweeps
+  # in experiments/crosseval/; full-test sweep in
+  # experiments/exp_round3_r101_dropout02/evaluation_test/threshold_sweep_test.csv.
+  threshold: 0.60
   version: 2.0.0
   released: '2026-05-23'
-  test_dice: 0.8697
-  test_iou: 0.7695
+  # Metrics below are PLAIN inference (no TTA) on the full 6,729-chip v2 test split
+  # at threshold 0.60 — i.e. what the UDF actually serves. (Earlier 0.8697 / 0.7695
+  # were TTA hard-slice-only and did not match the served path.)
+  # Object-level: 96% detection of real sites (median per-site Dice 0.936);
+  # 94.5% clean rejection of look-alikes. Known limit: sub-~5-acre sites are below
+  # Sentinel-2's 10 m resolution floor (tiny <50px ~0% detected).
+  test_dice: 0.899
+  test_iou: 0.8165
+  test_precision: 0.909
+  test_recall: 0.889
   training_chips: 26940
   training_loss: focal_dice

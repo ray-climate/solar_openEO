@@ -67,10 +67,10 @@ def register_udp(
         },
         {
             "name": "threshold",
-            "description": "Detection confidence threshold (default 0.80).",
+            "description": "Detection confidence threshold (default 0.60).",
             "schema": {"type": "number"},
             "optional": True,
-            "default": 0.80,
+            "default": 0.60,
         },
     ]
 

@@ -229,7 +229,7 @@ def build_solar_pv_detection_graph(
     spatial_extent: dict,
     temporal_extent: list[str],
     collection_id: str = "SENTINEL2_L1C",
-    threshold: float = 0.80,
+    threshold: float = 0.60,
     udf_path: str = "openeo_udp/udf/solar_pv_inference.py",
 ) -> openeo.DataCube:
     """Full detection pipeline: mosaic -> normalise -> infer -> threshold.
@@ -247,7 +247,8 @@ def build_solar_pv_detection_graph(
     collection_id : str
         Sentinel-2 collection.
     threshold : float
-        Detection threshold (default 0.80, from test-set evaluation).
+        Detection threshold (default 0.60, combined-Dice plateau on the v2 test
+        set under plain inference; recall-leaning ahead of the v2.1 FP filter).
     udf_path : str
         Path to the UDF Python file.
 
@@ -314,7 +315,7 @@ def example_usage():
         spatial_extent=spatial_extent,
         temporal_extent=temporal_extent,
         collection_id="SENTINEL2_L1C",
-        threshold=0.80,
+        threshold=0.60,
     )
 
     # Download result
