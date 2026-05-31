@@ -40,6 +40,15 @@ GEE_BANDS = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 # Raise toward 0.5 for more aggressive FP removal at the expense of recall.
 KEEP_THRESHOLD = 0.20
 
+# Abstain-on-large safeguard: never DELETE a contiguous detection bigger than
+# this (pixels @10m ~ 0.5 km^2). Real utility-scale PV plants are large and
+# contiguous; the temporal filter's failures (train/serve geometry mismatch)
+# fall hardest on exactly these big plants. The FPs we target (greenhouses,
+# bright roofs, small reflective surfaces) are small-to-medium, so capping the
+# filter to sub-threshold blobs preserves FP removal while guaranteeing a
+# multi-km^2 plant is never silently erased. Set to None to disable.
+ABSTAIN_ABOVE_PX = 5000
+
 
 # --------------------------------------------------------------------------
 # Mask -> polygons
@@ -165,9 +174,77 @@ def classify_polygons(blobs_4326, end_date: str,
     return out
 
 
+def _pct_features_for_blobs(blobs_4326, end_date: str,
+                            window_months: int = F.WINDOW_MONTHS) -> pd.DataFrame:
+    """Per-pixel NDVI/NDBI percentile features per blob, via the scatter-proof
+    per-feature extraction. Returns per-sample (blob_id) percentile features."""
+    from solar_fp_filter import timeseries_gee as tg
+    import ee
+    feats = []
+    for _, r in blobs_4326.iterrows():
+        feats.append(ee.Feature(ee.Geometry(r.geometry.__geo_interface__),
+                                 {"sample_id": str(r.blob_id)}))
+    fc = ee.FeatureCollection(feats)
+    eff_start = (pd.Timestamp(end_date) - pd.DateOffset(months=window_months)).strftime("%Y-%m-%d")
+    res = tg._percentile_perfeature(fc, eff_start, window_months)
+    ts_pct = tg._parse_pct_result(tg._getinfo_with_retry(res))
+    if len(ts_pct) == 0:
+        return pd.DataFrame(columns=["blob_id"])
+    pf = F.compute_pct_features(ts_pct)
+    pf["blob_id"] = pf["sample_id"].astype(int)
+    return pf
+
+
+def classify_polygons_pct(blobs_4326, end_date: str, model, cols,
+                          threshold: float = KEEP_THRESHOLD,
+                          window_months: int = F.WINDOW_MONTHS) -> pd.DataFrame:
+    """Like classify_polygons but using MEAN + PERCENTILE features (idea #1)
+    scored with the percentile model. Fail-open for blobs GEE can't score."""
+    if len(blobs_4326) == 0:
+        return pd.DataFrame(columns=["blob_id", "p_keep", "keep"])
+    ts = _gee_timeseries(blobs_4326, end_date, window_months)
+    cent = blobs_4326.set_index("blob_id").geometry.centroid
+    areas = blobs_4326.set_index("blob_id").to_crs("EPSG:3857").geometry.area
+    if len(ts) == 0:
+        feats = pd.DataFrame({"blob_id": blobs_4326.blob_id})
+    else:
+        feats = F.compute_features(ts)
+        feats["blob_id"] = feats["sample_id"].astype(int)
+    feats["abs_lat"] = feats["blob_id"].map(cent.y.abs())
+    feats["log_area"] = np.log10(feats["blob_id"].map(areas).clip(lower=1))
+    # merge percentile features
+    pf = _pct_features_for_blobs(blobs_4326, end_date, window_months)
+    if len(pf):
+        feats = feats.merge(pf.drop(columns=["sample_id"], errors="ignore"),
+                            on="blob_id", how="left")
+    for c in cols:
+        if c not in feats.columns:
+            feats[c] = np.nan
+    out_rows = []
+    scored = set()
+    if len(feats):
+        proba = model.predict(feats[cols].to_numpy(dtype=float))
+        feats["p_notpv"] = proba[:, CLASSES.index("not_pv")]
+        feats["p_becoming"] = proba[:, CLASSES.index("becoming_pv")]
+        feats["p_pv"] = proba[:, CLASSES.index("pv")]
+        feats["p_keep"] = feats["p_pv"] + feats["p_becoming"]
+        feats["keep"] = feats["p_keep"] >= threshold
+        scored = set(feats["blob_id"])
+        out = feats[["blob_id", "p_keep", "p_pv", "p_becoming", "p_notpv", "keep"]]
+    else:
+        out = pd.DataFrame(columns=["blob_id", "p_keep", "p_pv", "p_becoming", "p_notpv", "keep"])
+    missing = [b for b in blobs_4326.blob_id if b not in scored]
+    if missing:
+        extra = pd.DataFrame({"blob_id": missing, "p_keep": np.nan, "p_pv": np.nan,
+                              "p_becoming": np.nan, "p_notpv": np.nan, "keep": True})
+        out = pd.concat([out, extra], ignore_index=True)
+    return out
+
+
 def apply_filter(mask: np.ndarray, x_min, y_max, x_extent, y_extent,
                  end_date: str, crs_epsg: int = 3857,
-                 model=None, cols=None, threshold: float = KEEP_THRESHOLD):
+                 model=None, cols=None, threshold: float = KEEP_THRESHOLD,
+                 use_pct: bool = False, abstain_above_px: int = ABSTAIN_ABOVE_PX):
     """Full filter: mask -> filtered mask + verdict table.
 
     Returns (filtered_mask, blobs_gdf_with_verdicts).
@@ -180,10 +257,19 @@ def apply_filter(mask: np.ndarray, x_min, y_max, x_extent, y_extent,
     if len(blobs) == 0:
         return mask.copy(), blobs
 
-    verdicts = classify_polygons(blobs, end_date, model=model, cols=cols,
-                                 threshold=threshold)
+    if use_pct:
+        verdicts = classify_polygons_pct(blobs, end_date, model=model, cols=cols,
+                                         threshold=threshold)
+    else:
+        verdicts = classify_polygons(blobs, end_date, model=model, cols=cols,
+                                     threshold=threshold)
     blobs = blobs.merge(verdicts, on="blob_id", how="left")
     blobs["keep"] = blobs["keep"].fillna(True)
+    # Abstain-on-large: never delete a big contiguous detection.
+    if abstain_above_px is not None:
+        big = blobs["n_pixels"] > abstain_above_px
+        blobs.loc[big, "keep"] = True
+        blobs.loc[big, "abstained"] = True
 
     # Burn kept blobs back into a mask
     h, w = mask.shape

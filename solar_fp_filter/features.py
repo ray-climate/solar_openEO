@@ -113,9 +113,49 @@ def compute_features(ts: pd.DataFrame,
     return feats
 
 
+PCT_COLS = ["NDVI_p10", "NDVI_p25", "NDVI_p50", "NDVI_p75", "NDVI_p90",
+            "NDBI_p10", "NDBI_p25", "NDBI_p50", "NDBI_p75", "NDBI_p90"]
+
+
+def compute_pct_features(ts_pct: pd.DataFrame) -> pd.DataFrame:
+    """Per-pixel percentile time series -> wide per-sample percentile features.
+
+    Captures the panel-pixel TAIL the whole-blob mean dilutes away: low-NDVI
+    percentiles (p10/p25 = panel-dominated pixels) and high-NDBI percentiles
+    (p75/p90 = built-up pixels). Same last-WINDOW_MONTHS truncation + late
+    window as the mean features, so it matches inference.
+    """
+    rows = []
+    for sid, g in ts_pct.groupby("sample_id", sort=False):
+        g = g.sort_values("month")
+        if len(g) > WINDOW_MONTHS:
+            g = g.iloc[-WINDOW_MONTHS:]
+        n = len(g)
+        k = max(1, int(round(n * LATE_FRACTION)))
+        late = g.iloc[-k:]
+        f = {"sample_id": sid}
+        for c in PCT_COLS:
+            v = g[c].to_numpy(dtype=float)
+            f[f"{c}_mean"] = np.nanmean(v)
+            f[f"{c}_std"] = np.nanstd(v)
+            f[f"{c}_late"] = np.nanmean(late[c].to_numpy(dtype=float))
+        # spreads: within-footprint heterogeneity (panel+grass mix -> wide spread)
+        f["NDVI_spread_mean"] = np.nanmean(
+            (g["NDVI_p90"] - g["NDVI_p10"]).to_numpy(dtype=float))
+        f["NDBI_spread_mean"] = np.nanmean(
+            (g["NDBI_p90"] - g["NDBI_p10"]).to_numpy(dtype=float))
+        rows.append(f)
+    return pd.DataFrame(rows)
+
+
 def feature_columns(feats: pd.DataFrame) -> list[str]:
     """Columns to feed the model: everything numeric except identifiers,
-    label, and raw lat/area (we use abs_lat / log_area instead)."""
-    drop = {"sample_id", "class", "lat", "area_m2"}
+    label, split, and raw lat/area (we use abs_lat / log_area instead).
+
+    NOTE: explicitly excludes `y` and `split` — if a caller adds the integer
+    label `y` to the frame before calling this, it must NOT leak in as a
+    feature (that yields a spurious AUC=1.0)."""
+    drop = {"sample_id", "class", "lat", "area_m2", "y", "split",
+            "polygon_id", "negative_source", "window_name", "year_built"}
     return [c for c in feats.columns
             if c not in drop and pd.api.types.is_numeric_dtype(feats[c])]
