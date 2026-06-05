@@ -102,6 +102,35 @@ DEFAULT_MOSAIC_PARAMS = {
 REF_BAND_INDICES = [3, 2, 1, 7]
 
 
+# ---------------------------------------------------------------------------
+# Helpers: repository and mounted archive utilities
+# ---------------------------------------------------------------------------
+def _select_onnx_root() -> Path:
+    """Return the preferred mounted onnx_models root.
+
+    Prefer the configured `MODEL_DIR` (e.g. onnx_models/solar_pv_rui).
+    If that doesn't exist, fall back to the `onnx_models` mount.
+    """
+    model_root = Path(MODEL_DIR)
+    if not model_root.exists():
+        alt = Path("onnx_models")
+        if alt.exists():
+            return alt
+    return model_root
+
+
+def _repo_search_glob(pattern: str) -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[2]
+    return list(repo_root.rglob(pattern))
+
+
+def _prefer_export_match(paths: list[Path]) -> Path | None:
+    filtered = [p for p in paths if "export" in str(p.parts) and "releases" in str(p.parts)]
+    if len(filtered) == 1:
+        return filtered[0]
+    return None
+
+
 # ===========================================================================
 # ONNX session + band stats loaders (cached per executor)
 # ===========================================================================
@@ -119,48 +148,43 @@ def _ort_session_options() -> ort.SessionOptions:
 
 def _resolve_onnx_model_path(model_config: dict) -> Path:
     """Resolve model path from the mounted dependency archive (onnx_models/)."""
-    # Prefer the explicit model dir first (e.g. onnx_models/solar_pv_rui)
-    model_root = Path(MODEL_DIR)
+    model_root = _select_onnx_root()
 
-    # If that specific dir doesn't exist, try the mounted onnx_models root
-    if not model_root.exists():
-        alt = Path("onnx_models")
-        if alt.exists():
-            model_root = alt
-
-    # First attempt: exact filename under the selected root
+    # First: explicit candidate under model root
     candidate = model_root / DEFAULT_MODEL_NAME
     if candidate.exists():
         return candidate
 
-    # Next: any file matching DEFAULT_MODEL_NAME under the root
+    # Any exact-name matches under model root
     matches = list(model_root.rglob(DEFAULT_MODEL_NAME)) if model_root.exists() else []
     if len(matches) == 1:
         return matches[0]
     elif len(matches) > 1:
+        preferred = _prefer_export_match(matches)
+        if preferred:
+            return preferred
         raise FileNotFoundError(f"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}.")
 
-    # If still not found, broaden search to common alternative layouts
-    # e.g. onnx_models/openeo_dependencies/.../*.onnx
-    alt_matches = []
-    if model_root.exists():
-        alt_matches = [p for p in model_root.rglob("*.onnx")]
-        if len(alt_matches) == 1:
-            logger.info("Auto-selected ONNX model under %s: %s", model_root, alt_matches[0])
-            return alt_matches[0]
+    # Broaden: any .onnx under the model root (covers openeo_dependencies)
+    alt_matches = list(model_root.rglob("*.onnx")) if model_root.exists() else []
+    if len(alt_matches) == 1:
+        logger.info("Auto-selected ONNX model under %s: %s", model_root, alt_matches[0])
+        return alt_matches[0]
+    elif len(alt_matches) > 1:
+        preferred = _prefer_export_match(alt_matches)
+        if preferred:
+            return preferred
 
-    # Last resort: repository-wide search (useful in local dev)
-    repo_root = Path(__file__).resolve().parents[2]
-    repo_onnx = list(repo_root.rglob("*.onnx"))
+    # Repo-wide search as last resort
+    repo_onnx = _repo_search_glob("*.onnx")
     if len(repo_onnx) == 1:
         logger.info("Auto-selected ONNX model from repo: %s", repo_onnx[0])
         return repo_onnx[0]
     elif len(repo_onnx) > 1:
-        # Prefer files under export/releases if present
-        filtered = [p for p in repo_onnx if "export" in str(p.parts) and "releases" in str(p.parts)]
-        if len(filtered) == 1:
-            logger.info("Auto-selected ONNX model from exports: %s", filtered[0])
-            return filtered[0]
+        preferred = _prefer_export_match(repo_onnx)
+        if preferred:
+            logger.info("Auto-selected ONNX model from exports: %s", preferred)
+            return preferred
 
     raise FileNotFoundError(f"ONNX model not found under {model_root}. Repo search found: {repo_onnx + alt_matches}")
 
@@ -185,23 +209,46 @@ def _load_session(model_path_str: str) -> ort.InferenceSession:
 
 def _resolve_band_stats_path(model_config: dict) -> Path:
     """Resolve band stats from the mounted dependency archive (onnx_models/)."""
-    model_root = Path(MODEL_DIR)
+    model_root = _select_onnx_root()
+
+    # Directly next to model root
     stats_path = model_root / BAND_STATS_FILENAME
+    if stats_path.exists():
+        return stats_path
 
-    if not stats_path.exists():
-        matches = list(model_root.rglob(BAND_STATS_FILENAME))
-        if len(matches) >= 1:
-            stats_path = matches[0]
-            if len(matches) > 1:
-                logger.warning(
-                    "Multiple %s files; using %s", BAND_STATS_FILENAME, stats_path,
-                )
+    # Any band_stats under model root
+    matches = list(model_root.rglob(BAND_STATS_FILENAME)) if model_root.exists() else []
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        preferred = _prefer_export_match(matches)
+        if preferred:
+            return preferred
+        logger.warning("Multiple %s files under %s; using %s", BAND_STATS_FILENAME, model_root, matches[0])
+        return matches[0]
 
-    if not stats_path.exists():
-        raise FileNotFoundError(
-            f"band_stats.npz not found under {model_root}."
-        )
-    return stats_path
+    # Look next to discovered ONNX files
+    repo_onnx = _repo_search_glob("*.onnx")
+    for onnx_path in repo_onnx:
+        candidate = onnx_path.parent / BAND_STATS_FILENAME
+        if candidate.exists():
+            logger.info("Found band_stats next to ONNX model: %s", candidate)
+            return candidate
+
+    # Repo-wide band_stats search
+    repo_stats = _repo_search_glob(BAND_STATS_FILENAME)
+    if len(repo_stats) == 1:
+        logger.info("Auto-selected band_stats from repo: %s", repo_stats[0])
+        return repo_stats[0]
+    elif len(repo_stats) > 1:
+        preferred = _prefer_export_match(repo_stats)
+        if preferred:
+            logger.info("Auto-selected band_stats from exports: %s", preferred)
+            return preferred
+        logger.warning("Multiple band_stats.npz found in repo; using first: %s", repo_stats[0])
+        return repo_stats[0]
+
+    raise FileNotFoundError(f"band_stats.npz not found under {model_root} or repository.")
 
 
 @functools.lru_cache(maxsize=2)
