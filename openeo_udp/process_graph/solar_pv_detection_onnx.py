@@ -39,16 +39,46 @@ import openeo
 import yaml
 
 # ---------------------------------------------------------------------------
-# UDF dependency archives.
+# UDF dependency archives (ONNX runtime + model bundle).
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL_ARCHIVE_URL = (
-    "https://github.com/ray-climate/solar_openEO/releases/download/"
-    "v2.0.0/openeo_dependencies.zip#onnx_models"
-)
+REGISTRY_PATH = Path(__file__).resolve().parent.parent / "model_registry.yaml"
+
+
+def _resolve_model_archive_url(registry_path: Path = REGISTRY_PATH) -> str:
+    """Read model archive URL from model_registry.yaml with a safe fallback."""
+    fallback = (
+        "https://github.com/ray-climate/solar_openEO/releases/download/"
+        "v2.0.0/openeo_dependencies.zip#onnx_models"
+    )
+    try:
+        with registry_path.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        active = raw.get("active_model", {})
+        return str(active.get("model_archive_url") or fallback)
+    except Exception:
+        return fallback
+
+
+DEFAULT_MODEL_ARCHIVE_URL = _resolve_model_archive_url()
 DEFAULT_ONNX_DEPS_ARCHIVE_URL = (
     "https://s3.waw3-1.cloudferro.com/"
     "project_dependencies/onnx_deps_python311.zip#onnx_deps"
 )
+
+DEFAULT_JOB_OPTIONS: dict = {
+    "udf-dependency-archives": [
+        DEFAULT_ONNX_DEPS_ARCHIVE_URL,
+        DEFAULT_MODEL_ARCHIVE_URL,
+    ],
+    # Merged UDF: mosaic (SLIC + numpy) + ONNX U-Net per 256x256 chunk.
+    # Allow more headroom than a pure-inference run.
+    "executor-memory": "6g",
+    "executor-memoryOverhead": "3g",
+    "python-memory": "disable",
+    # Allow limited read failures from corrupted assets or intermittent IO
+    # in load_collection/load_stac/sar_backscatter paths.
+    "soft-errors": 0.1,
+}
 
 S2_L1C_BANDS = [
     "B01", "B02", "B03", "B04", "B05", "B06", "B07",
@@ -56,66 +86,14 @@ S2_L1C_BANDS = [
 ]
 
 UDF_PATH = Path(__file__).resolve().parent.parent / "udf" / "solar_pv_detection.py"
-REGISTRY_PATH = Path(__file__).resolve().parent.parent / "model_registry.yaml"
+
+# Detection threshold passed to the UDF context.
+THRESHOLD = 0.60
 
 # Chunk geometry: model needs exactly 256x256. size=192 + overlap=32 gives
 # a 256-pixel chunk to the UDF and a 32 px halo for seam-free inference.
 CHUNK_INNER_PX = 192
 CHUNK_OVERLAP_PX = 32
-
-# Temporal neighborhood in apply_neighborhood. This lets the UDF receive
-CHUNK_TEMPORAL_WINDOW = "P90D"
-
-
-def _load_active_model_config(registry_path: Path = REGISTRY_PATH) -> dict:
-    with registry_path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-    if not raw or "active_model" not in raw:
-        raise ValueError(f"Missing 'active_model' in {registry_path}")
-    return raw["active_model"]
-
-
-def _build_job_options(model_config: Optional[dict] = None) -> dict:
-    """Build default job options with registry-aware dependency archives.
-
-    If active_model.model_archive_url is set, use it as a fallback for legacy
-    archive-based runs. Otherwise we rely on UDF context URLs for ONNX and
-    band stats retrieval.
-    """
-    active_model = dict(model_config or _load_active_model_config())
-    archives = [DEFAULT_ONNX_DEPS_ARCHIVE_URL]
-
-    # Model artifact archive: prefer registry-specified URL, fall back to default.
-    model_archive_url = active_model.get("model_archive_url") or DEFAULT_MODEL_ARCHIVE_URL
-    archives.append(str(model_archive_url))
-
-    return {
-        "udf-dependency-archives": archives,
-        # Merged UDF: mosaic (SLIC + numpy) + ONNX U-Net per 256x256 chunk.
-        # Allow more headroom than a pure-inference run.
-        "executor-memory": "6g",
-        "executor-memoryOverhead": "3g",
-        "python-memory": "disable",
-        "soft-errors": 0.1,
-    }
-
-
-DEFAULT_JOB_OPTIONS: dict = _build_job_options()
-
-
-def _build_udf_context(model_config: Optional[dict] = None, threshold: Optional[float] = None) -> dict:
-    active_model = dict(model_config or _load_active_model_config())
-    context = {
-        "model_config": {
-            "name": active_model.get("name"),
-            "version": active_model.get("version"),
-            "normalization": active_model.get("normalization", "zscore"),
-            "threshold": float(active_model.get("threshold", 0.80)),
-        }
-    }
-    if threshold is not None:
-        context["threshold"] = float(threshold)
-    return context
 
 
 def _load_l1c_cube(
@@ -155,7 +133,6 @@ def build_solar_pv_detection_onnx(
     spatial_extent: dict,
     temporal_extent: list[str],
     udf_path: Optional[str] = None,
-    threshold: Optional[float] = None,
 ) -> openeo.DataCube:
     """Build the merged mosaic+ONNX inference cube.
 
@@ -174,7 +151,27 @@ def build_solar_pv_detection_onnx(
 
     udf_src_path = Path(udf_path) if udf_path else UDF_PATH
     udf_code = udf_src_path.read_text(encoding="utf-8")
-    udf_context = _build_udf_context(threshold=threshold)
+
+    # Resolve model-config (threshold, normalization) from registry so the
+    # UDF runs with the same contract the model was trained with.
+    try:
+        with REGISTRY_PATH.open("r", encoding="utf-8") as f:
+            registry = yaml.safe_load(f) or {}
+        active = registry.get("active_model", {})
+    except Exception:
+        active = {}
+
+    model_config = {}
+    if "normalization" in active:
+        model_config["normalization"] = active["normalization"]
+    if "threshold" in active:
+        try:
+            model_config["threshold"] = float(active["threshold"])
+        except Exception:
+            model_config["threshold"] = THRESHOLD
+    model_config.setdefault("threshold", THRESHOLD)
+
+    udf_context = {"model_config": model_config}
 
     # Single apply_neighborhood: chunk = inner (192) + 2*overlap (32) = 256.
     # The merged UDF mosaics the temporal stack and runs ONNX inference
@@ -189,12 +186,10 @@ def build_solar_pv_detection_onnx(
         size=[
             {"dimension": "x", "value": CHUNK_INNER_PX, "unit": "px"},
             {"dimension": "y", "value": CHUNK_INNER_PX, "unit": "px"},
-            {"dimension": "t", "value": CHUNK_TEMPORAL_WINDOW},
         ],
         overlap=[
             {"dimension": "x", "value": CHUNK_OVERLAP_PX, "unit": "px"},
             {"dimension": "y", "value": CHUNK_OVERLAP_PX, "unit": "px"},
-            {"dimension": "t", "value": 0},
         ],
     )
     return detected

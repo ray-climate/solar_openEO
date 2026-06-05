@@ -34,9 +34,9 @@ Context overrides::
     {
         "model_config": {
             "normalization": "zscore",
-            "threshold": 0.80,
+            "threshold": 0.60,
         },
-        "threshold": 0.80,             # optional override
+        "threshold": 0.60,             # optional override
         "clear_thresh": 0.8,           # mosaic cluster clear-fraction threshold
         "top_n_scenes": 8,             # max mosaic candidates
         "top_n_rescue": 10,            # max rescue scenes
@@ -44,8 +44,6 @@ Context overrides::
         "snic_compactness": 1.0,       # SLIC compactness
     }
 """
-
-from __future__ import annotations
 
 import functools
 import logging
@@ -75,7 +73,7 @@ logger = logging.getLogger(__name__)
 NUM_THREADS = 2
 
 DEFAULT_MODEL_NAME = "solar_pv.onnx"
-DEFAULT_THRESHOLD = 0.80
+DEFAULT_THRESHOLD = 0.60
 DEFAULT_NORMALIZATION = "zscore"
 
 MODEL_DIR = "onnx_models/solar_pv_rui"
@@ -476,19 +474,47 @@ def _create_temporal_mosaic(
 # ===========================================================================
 
 def _resolve_model_config(context: dict | None) -> dict:
-    config = {
+    # Determine sources per-key so we can log whether values came from the
+    # embedded `model_config` (registry), top-level context overrides, or
+    # fell back to defaults.
+    config: dict = {
         "normalization": DEFAULT_NORMALIZATION,
         "threshold": DEFAULT_THRESHOLD,
     }
+
+    norm_src = "default"
+    thr_src = "default"
+
     if context and isinstance(context.get("model_config"), dict):
-        config.update(context["model_config"])
+        mc = context["model_config"]
+        if "normalization" in mc:
+            config["normalization"] = mc["normalization"]
+            norm_src = "model_config"
+        if "threshold" in mc:
+            try:
+                config["threshold"] = float(mc["threshold"])
+                thr_src = "model_config"
+            except Exception:
+                pass
+
     if context and "normalization" in context:
         config["normalization"] = context["normalization"]
+        norm_src = "context"
+
     if context and "threshold" in context:
-        config["threshold"] = context["threshold"]
+        try:
+            config["threshold"] = float(context["threshold"])
+            thr_src = "context"
+        except Exception:
+            pass
 
     config["normalization"] = str(config.get("normalization", DEFAULT_NORMALIZATION)).lower()
     config["threshold"] = float(config.get("threshold", DEFAULT_THRESHOLD))
+
+    logger.info(
+        "Resolved model config: normalization=%s (%s) threshold=%.3f (%s)",
+        config["normalization"], norm_src, config["threshold"], thr_src,
+    )
     return config
 
 
@@ -670,3 +696,4 @@ def apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:
         dims=("bands", y_dim, x_dim),
         coords=coords,
     )
+
