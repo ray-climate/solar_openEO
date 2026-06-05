@@ -119,30 +119,53 @@ def _ort_session_options() -> ort.SessionOptions:
 
 def _resolve_onnx_model_path(model_config: dict) -> Path:
     """Resolve model path from the mounted dependency archive (onnx_models/)."""
+    # Prefer the explicit model dir first (e.g. onnx_models/solar_pv_rui)
     model_root = Path(MODEL_DIR)
-    model_path = model_root / DEFAULT_MODEL_NAME
 
-    if not model_path.exists():
-        by_name = list(model_root.rglob(DEFAULT_MODEL_NAME))
-        if len(by_name) == 1:
-            model_path = by_name[0]
-        elif len(by_name) > 1:
-            raise FileNotFoundError(
-                f"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}."
-            )
-        else:
-            all_onnx = list(model_root.rglob("*.onnx"))
-            if len(all_onnx) == 1:
-                model_path = all_onnx[0]
-                logger.info("Auto-selected ONNX model: %s", model_path)
-            else:
-                raise FileNotFoundError(
-                    f"ONNX model not found under {model_root}. Found: {all_onnx}"
-                )
-    return model_path
+    # If that specific dir doesn't exist, try the mounted onnx_models root
+    if not model_root.exists():
+        alt = Path("onnx_models")
+        if alt.exists():
+            model_root = alt
+
+    # First attempt: exact filename under the selected root
+    candidate = model_root / DEFAULT_MODEL_NAME
+    if candidate.exists():
+        return candidate
+
+    # Next: any file matching DEFAULT_MODEL_NAME under the root
+    matches = list(model_root.rglob(DEFAULT_MODEL_NAME)) if model_root.exists() else []
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        raise FileNotFoundError(f"Multiple ONNX model matches for '{DEFAULT_MODEL_NAME}' under {model_root}.")
+
+    # If still not found, broaden search to common alternative layouts
+    # e.g. onnx_models/openeo_dependencies/.../*.onnx
+    alt_matches = []
+    if model_root.exists():
+        alt_matches = [p for p in model_root.rglob("*.onnx")]
+        if len(alt_matches) == 1:
+            logger.info("Auto-selected ONNX model under %s: %s", model_root, alt_matches[0])
+            return alt_matches[0]
+
+    # Last resort: repository-wide search (useful in local dev)
+    repo_root = Path(__file__).resolve().parents[2]
+    repo_onnx = list(repo_root.rglob("*.onnx"))
+    if len(repo_onnx) == 1:
+        logger.info("Auto-selected ONNX model from repo: %s", repo_onnx[0])
+        return repo_onnx[0]
+    elif len(repo_onnx) > 1:
+        # Prefer files under export/releases if present
+        filtered = [p for p in repo_onnx if "export" in str(p.parts) and "releases" in str(p.parts)]
+        if len(filtered) == 1:
+            logger.info("Auto-selected ONNX model from exports: %s", filtered[0])
+            return filtered[0]
+
+    raise FileNotFoundError(f"ONNX model not found under {model_root}. Repo search found: {repo_onnx + alt_matches}")
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=2)
 def _load_session(model_path_str: str) -> ort.InferenceSession:
     """Load and cache ONNX session per resolved model artifact path."""
     model_path = Path(model_path_str)
@@ -181,7 +204,7 @@ def _resolve_band_stats_path(model_config: dict) -> Path:
     return stats_path
 
 
-@functools.lru_cache(maxsize=4)
+@functools.lru_cache(maxsize=2)
 def _load_band_stats(stats_path_str: str) -> dict:
     """Load and cache per-band stats from band_stats.npz."""
     stats_path = Path(stats_path_str)
