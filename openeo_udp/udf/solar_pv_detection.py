@@ -4,8 +4,8 @@ This UDF performs the full per-chunk pipeline in a single executor call:
     1. SLIC-based cloud-free temporal mosaic of a multi-temporal Sentinel-2
        L1C + SCL stack (mirrors the GEE SNIC pipeline used to build the
        training chips).
-    2. Training-aligned percentile normalization (matches
-       ``solar_ml.data.normalize_batch`` with ``mode='percentile'``).
+     2. Training-aligned normalization, resolved from model metadata passed
+         via UDF context.
     3. ONNX U-Net inference (fixed 256x256 / 13-band input).
 
 Merging both steps avoids an intermediate cube materialisation/shuffle
@@ -32,7 +32,11 @@ Output bands (2):
 Context overrides::
 
     {
-        "threshold": 0.80,             # detection threshold
+        "model_config": {
+            "normalization": "zscore",
+            "threshold": 0.80,
+        },
+        "threshold": 0.80,             # optional override
         "clear_thresh": 0.8,           # mosaic cluster clear-fraction threshold
         "top_n_scenes": 8,             # max mosaic candidates
         "top_n_rescue": 10,            # max rescue scenes
@@ -40,6 +44,8 @@ Context overrides::
         "snic_compactness": 1.0,       # SLIC compactness
     }
 """
+
+from __future__ import annotations
 
 import functools
 import logging
@@ -60,8 +66,6 @@ from openeo.metadata import CollectionMetadata
 sys.path.append("onnx_deps")
 import onnxruntime as ort  # noqa: E402
 
-sys.path.append("onnx_models")
-
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +76,7 @@ NUM_THREADS = 2
 
 DEFAULT_MODEL_NAME = "solar_pv.onnx"
 DEFAULT_THRESHOLD = 0.80
+DEFAULT_NORMALIZATION = "zscore"
 
 MODEL_DIR = "onnx_models/solar_pv_rui"
 BAND_STATS_FILENAME = "band_stats.npz"
@@ -114,9 +119,8 @@ def _ort_session_options() -> ort.SessionOptions:
     return so
 
 
-@functools.lru_cache(maxsize=1)
-def _load_session() -> ort.InferenceSession:
-    """Load the ONNX model from the dependency archive."""
+def _resolve_onnx_model_path(model_config: dict) -> Path:
+    """Resolve model path from the mounted dependency archive (onnx_models/)."""
     model_root = Path(MODEL_DIR)
     model_path = model_root / DEFAULT_MODEL_NAME
 
@@ -137,6 +141,13 @@ def _load_session() -> ort.InferenceSession:
                 raise FileNotFoundError(
                     f"ONNX model not found under {model_root}. Found: {all_onnx}"
                 )
+    return model_path
+
+
+@functools.lru_cache(maxsize=4)
+def _load_session(model_path_str: str) -> ort.InferenceSession:
+    """Load and cache ONNX session per resolved model artifact path."""
+    model_path = Path(model_path_str)
 
     logger.info("Loading ONNX model: %s", model_path)
     session = ort.InferenceSession(
@@ -151,9 +162,8 @@ def _load_session() -> ort.InferenceSession:
     return session
 
 
-@functools.lru_cache(maxsize=1)
-def _load_band_stats() -> dict:
-    """Load per-band stats (mean, std, p2, p98) from band_stats.npz."""
+def _resolve_band_stats_path(model_config: dict) -> Path:
+    """Resolve band stats from the mounted dependency archive (onnx_models/)."""
     model_root = Path(MODEL_DIR)
     stats_path = model_root / BAND_STATS_FILENAME
 
@@ -170,27 +180,30 @@ def _load_band_stats() -> dict:
         raise FileNotFoundError(
             f"band_stats.npz not found under {model_root}."
         )
+    return stats_path
+
+
+@functools.lru_cache(maxsize=4)
+def _load_band_stats(stats_path_str: str) -> dict:
+    """Load and cache per-band stats from band_stats.npz."""
+    stats_path = Path(stats_path_str)
 
     data = np.load(stats_path)
-    if "p2" not in data.files or "p98" not in data.files:
-        raise ValueError(
-            f"band_stats.npz at {stats_path} missing 'p2'/'p98' "
-            f"(found {list(data.files)})."
-        )
     stats = {
         "mean": data["mean"].astype(np.float32),
         "std": data["std"].astype(np.float32),
-        "p2": data["p2"].astype(np.float32),
-        "p98": data["p98"].astype(np.float32),
     }
-    for key in ("mean", "std", "p2", "p98"):
+    if "p2" in data.files:
+        stats["p2"] = data["p2"].astype(np.float32)
+    if "p98" in data.files:
+        stats["p98"] = data["p98"].astype(np.float32)
+
+    for key in stats:
         if stats[key].shape != (13,):
             raise ValueError(
                 f"band_stats[{key}] shape {stats[key].shape} != (13,)"
             )
-    logger.info(
-        "Loaded band_stats: p2=%s p98=%s", stats["p2"], stats["p98"],
-    )
+    logger.info("Loaded band_stats keys: %s", sorted(stats))
     return stats
 
 
@@ -462,12 +475,32 @@ def _create_temporal_mosaic(
 # Inference helpers
 # ===========================================================================
 
-def _normalize_training(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Percentile normalization, mirroring solar_ml.data.normalize_batch."""
-    stats = _load_band_stats()
+def _resolve_model_config(context: dict | None) -> dict:
+    config = {
+        "normalization": DEFAULT_NORMALIZATION,
+        "threshold": DEFAULT_THRESHOLD,
+    }
+    if context and isinstance(context.get("model_config"), dict):
+        config.update(context["model_config"])
+    if context and "normalization" in context:
+        config["normalization"] = context["normalization"]
+    if context and "threshold" in context:
+        config["threshold"] = context["threshold"]
+
+    config["normalization"] = str(config.get("normalization", DEFAULT_NORMALIZATION)).lower()
+    config["threshold"] = float(config.get("threshold", DEFAULT_THRESHOLD))
+    return config
+
+
+def _normalize_training(
+    image_hwc: np.ndarray,
+    normalization: str,
+    model_config: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize an input chip using the configured training contract."""
+    stats_path = _resolve_band_stats_path(model_config)
+    stats = _load_band_stats(str(stats_path))
     mean = stats["mean"]
-    p2 = stats["p2"]
-    p98 = stats["p98"]
 
     invalid_mask = ~np.isfinite(image_hwc).all(axis=-1)
 
@@ -478,8 +511,19 @@ def _normalize_training(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if nan_mask.any():
             band[nan_mask] = float(mean[b])
 
-    denom = np.maximum(p98 - p2, 1.0)
-    image_norm = np.clip((image - p2[None, None, :]) / denom[None, None, :], 0.0, 1.0)
+    if normalization == "zscore":
+        std = np.maximum(stats["std"], 1e-6)
+        image_norm = (image - mean[None, None, :]) / std[None, None, :]
+    elif normalization == "percentile":
+        if "p2" not in stats or "p98" not in stats:
+            raise ValueError("Percentile normalization requested but p2/p98 are missing from band_stats.npz")
+        p2 = stats["p2"]
+        p98 = stats["p98"]
+        denom = np.maximum(p98 - p2, 1.0)
+        image_norm = np.clip((image - p2[None, None, :]) / denom[None, None, :], 0.0, 1.0)
+    else:
+        raise ValueError(f"Unsupported normalization mode: {normalization}")
+
     image_norm = np.nan_to_num(image_norm, nan=0.0, posinf=0.0, neginf=0.0)
     return image_norm.astype(np.float32), invalid_mask
 
@@ -487,12 +531,18 @@ def _normalize_training(image_hwc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _run_inference(
     session: ort.InferenceSession,
     image_hwc: np.ndarray,
+    normalization: str,
     threshold: float,
+    model_config: dict,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run ONNX inference. Returns (binary, probs)."""
     h, w = image_hwc.shape[:2]
 
-    image_norm, invalid_mask = _normalize_training(image_hwc.astype(np.float32))
+    image_norm, invalid_mask = _normalize_training(
+        image_hwc.astype(np.float32),
+        normalization=normalization,
+        model_config=model_config,
+    )
 
     if bool(invalid_mask.all()):
         return (
@@ -503,8 +553,8 @@ def _run_inference(
     batch = image_norm[np.newaxis, ...]  # (1, H, W, 13)
 
     logger.info(
-        "NORMALIZED input: shape=%s min=%.4f max=%.4f mean=%.4f",
-        batch.shape, float(batch.min()), float(batch.max()), float(batch.mean()),
+        "NORMALIZED input: mode=%s shape=%s min=%.4f max=%.4f mean=%.4f",
+        normalization, batch.shape, float(batch.min()), float(batch.max()), float(batch.mean()),
     )
 
     input_name = session.get_inputs()[0].name
@@ -547,7 +597,9 @@ def apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:
     Input cube dims: (t, bands, y, x) with 14 bands (13 L1C + SCL).
     Output cube dims: (bands, y, x) with 2 bands.
     """
-    threshold = float(context.get("threshold", DEFAULT_THRESHOLD))
+    model_config = _resolve_model_config(context)
+    threshold = model_config["threshold"]
+    normalization = model_config["normalization"]
     mosaic_params = _resolve_mosaic_params(context)
 
     dims = list(cube.dims)
@@ -583,8 +635,21 @@ def apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:
 
     # --- Inference ---
     image_hwc = np.transpose(composite, (1, 2, 0))  # (H, W, 13)
-    session = _load_session()
-    binary, probs = _run_inference(session, image_hwc, threshold)
+    model_path = _resolve_onnx_model_path(model_config)
+    session = _load_session(str(model_path))
+    logger.info(
+        "Inference config: normalization=%s threshold=%.3f model=%s",
+        normalization,
+        threshold,
+        model_path,
+    )
+    binary, probs = _run_inference(
+        session,
+        image_hwc,
+        normalization,
+        threshold,
+        model_config,
+    )
 
     stacked = np.stack(
         [

@@ -27,8 +27,12 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import shutil
+import subprocess
 import sys
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -39,6 +43,28 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 logger = logging.getLogger(__name__)
+
+
+def _download_url_to_path(url: str, dest: Path, label: str = "artifact") -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {label} from {url} ...")
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with urllib.request.urlopen(url, timeout=600) as resp:
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        with tmp.open("wb") as f:
+            while True:
+                chunk = resp.read(8 * 1024 * 1024)  # 8 MB chunks
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded / total * 100
+                    print(f"  {downloaded / 1e6:.0f} / {total / 1e6:.0f} MB ({pct:.0f}%)", end="\r")
+    tmp.replace(dest)
+    print(f"\nDownloaded: {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
+    return dest
 
 
 def _load_active_model(registry_path: Path) -> dict:
@@ -57,43 +83,42 @@ def _load_active_model(registry_path: Path) -> dict:
 
 
 def _resolve_weights_path(model_cfg: dict, weights_arg: str | None) -> Path:
-    from openeo_udp.udf.solar_pv_inference import _download_if_needed
-
     def _is_url(value: str) -> bool:
         v = value.lower()
         return v.startswith("http://") or v.startswith("https://")
 
     if weights_arg:
         if _is_url(weights_arg):
-            return _download_if_needed(weights_arg)
+            dest = REPO / "openeo_udp" / "export" / "releases" / "download_cache" / "best.weights.h5"
+            return _download_url_to_path(weights_arg, dest, label="weights")
 
         path = Path(weights_arg)
         if not path.is_absolute():
             path = (REPO / path).resolve()
-
         if not path.exists():
             raise FileNotFoundError(f"Weights not found: {path}")
         return path
 
-    # Default path from registry: try local first, then URL fallback.
+    # No --weights given: try local cache from registry, then download from weights_url.
     local = model_cfg.get("weights_local")
     weights_url = model_cfg.get("weights_url")
 
     if local:
-        local_path = REPO / local
+        local_path = (REPO / local).resolve()
         if local_path.exists():
-            return local_path.resolve()
+            return local_path
 
     if weights_url:
-        return _download_if_needed(weights_url, local_fallback=local)
-
-    # Nothing available.
-    if local:
-        missing_local = (REPO / local).resolve()
-        raise FileNotFoundError(
-            f"Weights not found: {missing_local}. Also missing active_model.weights_url in model_registry.yaml"
+        # Download and save to weights_local so the next run skips the download.
+        dest = (REPO / local).resolve() if local else (
+            REPO / "openeo_udp" / "export" / "releases" / "download_cache" / "best.weights.h5"
         )
+        return _download_url_to_path(weights_url, dest, label="weights")
 
+    if local:
+        raise FileNotFoundError(
+            f"Weights not found locally ({REPO / local}) and no weights_url in model_registry.yaml."
+        )
     raise ValueError(
         "No --weights provided and active_model has neither weights_local nor weights_url in model_registry.yaml"
     )
@@ -170,6 +195,61 @@ def _convert_to_onnx(model, output_path: Path, opset: int, dynamic_spatial: bool
     _do_convert(use_dynamic_spatial=False)
 
 
+def _package_model_archive(
+    onnx_path: Path,
+    model_cfg: dict,
+    archive_dir_name: str = "openeo_dependencies",
+) -> Path:
+    """Create <release_dir>/openeo_dependencies.zip ready for GitHub Release upload.
+
+    Internal ZIP structure::
+
+        openeo_dependencies/
+            solar_pv.onnx
+            band_stats.npz
+
+    The archive is mounted by OpenEO as ``onnx_models/`` via the
+    ``udf-dependency-archives`` URL fragment ``#onnx_models``, giving::
+
+        onnx_models/openeo_dependencies/solar_pv.onnx
+        onnx_models/openeo_dependencies/band_stats.npz
+    """
+    release_dir = onnx_path.parent
+    stats_path = release_dir / "band_stats.npz"
+    if not stats_path.exists():
+        # Also look one level down in the archive_dir_name sub-folder
+        stats_path = release_dir / archive_dir_name / "band_stats.npz"
+    if not stats_path.exists():
+        band_stats_url = model_cfg.get("band_stats_url")
+        if not band_stats_url:
+            raise FileNotFoundError(
+                f"band_stats.npz not found in {release_dir} and active_model.band_stats_url is missing."
+            )
+        stats_path = release_dir / "band_stats.npz"
+        _download_url_to_path(str(band_stats_url), stats_path, label="band_stats")
+
+    zip_path = release_dir / f"{archive_dir_name}.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(onnx_path, arcname=f"{archive_dir_name}/solar_pv.onnx")
+        zf.write(stats_path, arcname=f"{archive_dir_name}/band_stats.npz")
+
+    print(f"Archive: {zip_path} ({zip_path.stat().st_size / 1e6:.1f} MB)")
+    return zip_path
+
+
+def _detect_repo_url() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip().replace(".git", "")
+    except Exception:
+        return "https://github.com/<owner>/solar_openEO"
+
+
 def _validate_onnx(model, onnx_path: Path) -> None:
     import numpy as np
 
@@ -237,6 +317,16 @@ def main() -> None:
         help="Run ONNX checker + quick parity test (requires onnxruntime)",
     )
     parser.add_argument(
+        "--package",
+        action="store_true",
+        help=(
+            "After ONNX export, bundle solar_pv.onnx + band_stats.npz into "
+            "solar_pv_rui.zip ready for GitHub Release upload. "
+            "band_stats.npz must already be in the same release directory "
+            "(run export_weights.py first)."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable INFO logging (shows download/build/convert progress)",
@@ -283,6 +373,47 @@ def main() -> None:
     print(f"Conversion finished in {time.perf_counter() - t_convert:.1f}s")
     print(f"ONNX exported: {output_path} ({output_path.stat().st_size / 1e6:.1f} MB)")
 
+    # ---- optional packaging step ------------------------------------------
+    zip_path: Path | None = None
+    if args.package:
+        print("\nPackaging model archive...")
+        zip_path = _package_model_archive(output_path, model_cfg=model_cfg)
+
+    # ---- release instructions ---------------------------------------------
+    release_tag = None
+    if "releases" in output_path.parts:
+        parts = list(output_path.parts)
+        idx = parts.index("releases")
+        if idx + 1 < len(parts):
+            release_tag = parts[idx + 1]
+
+    repo_url = _detect_repo_url()
+
+    if release_tag:
+        archive_name = zip_path.name if zip_path else "openeo_dependencies.zip"
+        archive_url = f"{repo_url}/releases/download/{release_tag}/{archive_name}"
+        mount_point = "onnx_models"
+
+        assets = str(output_path)
+        if zip_path:
+            assets += f" \\\'\n       {zip_path}"
+
+        print(f"""
+--- Next steps ---
+
+1. Upload artifacts to GitHub Release:
+
+   gh release create {release_tag} \\
+       {assets} \\
+       --title "Solar PV Model {release_tag}" \\
+       --notes "See model_registry.yaml for full metadata."
+
+2. Paste into openeo_udp/model_registry.yaml:
+
+   version: "{release_tag.lstrip('v')}"
+   model_archive_url: {archive_url}#{mount_point}
+""")
+
     if args.validate:
         t_validate = time.perf_counter()
         _validate_onnx(model, output_path)
@@ -293,3 +424,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
