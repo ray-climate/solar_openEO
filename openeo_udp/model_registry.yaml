@@ -1,10 +1,27 @@
 active_model:
-  name: round3_r101_focal_dice_zscore_round3_v2
-  experiment: exp_round3_r101_dropout02
+  # Human-readable model identifier
+  name: r101_focal_dice_zscore_v2
+
+  # Source experiment directory (for provenance tracking)
+  experiment: exp_stage1_r101_focal_dice_zscore_v2
+
+  # Download URLs — GitHub Release v2.0.0
   weights_url: https://github.com/ray-climate/solar_openEO/releases/download/v2.0.0/best.weights.h5
   band_stats_url: https://github.com/ray-climate/solar_openEO/releases/download/v2.0.0/band_stats.npz
-  weights_local: experiments/exp_round3_r101_dropout02/best.weights.h5
-  band_stats_local: outputs/training_prep/final_v2/band_stats.npz
+
+  # ONNX + dependency archive — populated after running export_onnx.py --package
+  # and uploading openeo_dependencgit ies.zip to the v2.0.0 release:
+  #   python openeo_udp/export/export_onnx.py \
+  #       --output openeo_udp/export/releases/v2.0.0/solar_pv.onnx \
+  #       --validate --package
+  #   gh release upload v2.0.0 openeo_udp/export/releases/v2.0.0/openeo_dependencies.zip
+  model_archive_url: https://github.com/ray-climate/solar_openEO/releases/download/v2.0.0/openeo_dependencies.zip#onnx_models
+
+  # Local fallback paths (relative to repo root, for development/testing)
+  weights_local: openeo_udp/export/releases/v2.0.0/best.weights.h5
+  band_stats_local: openeo_udp/export/releases/v2.0.0/band_stats.npz
+
+  # Architecture parameters (must match the trained model exactly)
   backbone: resnet101
   decoder_filters:
   - 256
@@ -20,38 +37,32 @@ active_model:
   - 256
   - 13
   bands:
-  - B1
-  - B2
-  - B3
-  - B4
-  - B5
-  - B6
-  - B7
-  - B8
-  - B8A
-  - B9
-  - B10
-  - B11
-  - B12
-  normalization: zscore
-  # Production threshold: combined-Dice plateau peak on the full test set under
-  # PLAIN inference. Kept on the recall-leaning side of the flat plateau because a
-  # second-stage temporal FP filter (v2.1) will handle false positives downstream,
-  # while stage-1 false negatives (missed sites) are unrecoverable. Per-slice sweeps
-  # in experiments/crosseval/; full-test sweep in
-  # experiments/exp_round3_r101_dropout02/evaluation_test/threshold_sweep_test.csv.
-  threshold: 0.60
-  version: 2.0.0
-  released: '2026-05-23'
-  # Metrics below are PLAIN inference (no TTA) on the full 6,729-chip v2 test split
-  # at threshold 0.60 — i.e. what the UDF actually serves. (Earlier 0.8697 / 0.7695
-  # were TTA hard-slice-only and did not match the served path.)
-  # Object-level: 96% detection of real sites (median per-site Dice 0.936);
-  # 94.5% clean rejection of look-alikes. Known limit: sub-~5-acre sites are below
-  # Sentinel-2's 10 m resolution floor (tiny <50px ~0% detected).
-  test_dice: 0.899
+    - B1    # 0  - Coastal aerosol (60m)
+    - B2    # 1  - Blue (10m)
+    - B3    # 2  - Green (10m)
+    - B4    # 3  - Red (10m)
+    - B5    # 4  - Vegetation Red Edge 1 (20m)
+    - B6    # 5  - Vegetation Red Edge 2 (20m)
+    - B7    # 6  - Vegetation Red Edge 3 (20m)
+    - B8    # 7  - NIR (10m)
+    - B8A   # 8  - Vegetation Red Edge 4 (20m)
+    - B9    # 9  - Water vapour (60m)
+    - B10   # 10 - SWIR Cirrus (60m)
+    - B11   # 11 - SWIR 1 (20m)
+    - B12   # 12 - SWIR 2 (20m)
+
+  # Preprocessing
+  normalization: zscore  # (pixel - mean) / std, per-band
+
+  # Inference
+  threshold: 0.60        # Optimal threshold from test-set sweep (Dice 0.899)
+
+  # Metadata
+  version: "2.0.0"
+  released: "2026-06-03"
+  test_dice: 0.899       # At threshold 0.60 — full 6,729-chip test set
   test_iou: 0.8165
   test_precision: 0.909
   test_recall: 0.889
-  training_chips: 26940
+  training_chips: 26940  # Round-3 with hard-negative harvest
   training_loss: focal_dice

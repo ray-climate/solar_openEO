@@ -30,6 +30,7 @@ from typing import Tuple
 
 import numpy as np
 from scipy import ndimage
+import xarray as xr
 
 logger = logging.getLogger(__name__)
 
@@ -589,7 +590,7 @@ def create_temporal_mosaic(
 # OpenEO UDF entry point
 # ===================================================================
 
-def apply_datacube(cube, context: dict) -> "XarrayDataCube":
+def apply_datacube(cube: xr.DataArray, context: dict) -> xr.DataArray:
     """OpenEO UDF entry point for temporal mosaicing.
 
     Expects a datacube with dimensions (t, bands, y, x) where bands
@@ -600,21 +601,17 @@ def apply_datacube(cube, context: dict) -> "XarrayDataCube":
 
     Parameters
     ----------
-    cube : openeo.udf.XarrayDataCube
+    cube : xr.DataArray
         Input datacube with shape (T, 14, H, W) — 13 spectral + SCL.
     context : dict
         Optional parameter overrides (clear_thresh, top_n_scenes, etc.).
 
     Returns
     -------
-    openeo.udf.XarrayDataCube
+    xr.DataArray
         Single-timestep datacube with 13 spectral bands.
     """
-    import xarray as xr
-    from openeo.udf import XarrayDataCube
-
-    array = cube.get_array()  # xarray.DataArray
-    data = array.values  # numpy array
+    array = cube  # already xr.DataArray when invoked via apply_neighborhood
 
     # Determine dimension order and reshape to (T, bands, H, W)
     dims = list(array.dims)
@@ -641,7 +638,7 @@ def apply_datacube(cube, context: dict) -> "XarrayDataCube":
         logger.warning("No SCL band provided, falling back to median composite")
         composite = np.nanmedian(spectral, axis=0)
         result = xr.DataArray(composite, dims=[b_dim, *spatial_dims])
-        return XarrayDataCube(result)
+        return result
     else:
         raise ValueError(f"Expected 13 or 14 bands, got {n_bands}")
 
@@ -667,4 +664,4 @@ def apply_datacube(cube, context: dict) -> "XarrayDataCube":
         },
     )
 
-    return XarrayDataCube(result)
+    return result
