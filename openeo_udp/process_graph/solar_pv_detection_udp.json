@@ -1,5 +1,26 @@
 {
   "process_graph": {
+    "multiply1": {
+      "process_id": "multiply",
+      "arguments": {
+        "x": {
+          "from_parameter": "months"
+        },
+        "y": -1
+      }
+    },
+    "dateshift1": {
+      "process_id": "date_shift",
+      "arguments": {
+        "date": {
+          "from_parameter": "end_date"
+        },
+        "unit": "month",
+        "value": {
+          "from_node": "multiply1"
+        }
+      }
+    },
     "loadcollection1": {
       "process_id": "load_collection",
       "arguments": {
@@ -38,9 +59,14 @@
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
-        "temporal_extent": {
-          "from_parameter": "temporal_extent"
-        }
+        "temporal_extent": [
+          {
+            "from_node": "dateshift1"
+          },
+          {
+            "from_parameter": "end_date"
+          }
+        ]
       }
     },
     "resamplespatial1": {
@@ -81,9 +107,14 @@
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
-        "temporal_extent": {
-          "from_parameter": "temporal_extent"
-        }
+        "temporal_extent": [
+          {
+            "from_node": "dateshift1"
+          },
+          {
+            "from_parameter": "end_date"
+          }
+        ]
       }
     },
     "resamplespatial2": {
@@ -166,7 +197,7 @@
   },
   "id": "solar_pv_detection",
   "summary": "Solar PV detection (ONNX)",
-  "description": "Sentinel-2 L1C temporal mosaic + ONNX UDF inference. Returns 'solar_pv' (binary) and 'solar_pv_probability' (float).",
+  "description": "Sentinel-2 L1C temporal mosaic + ONNX UDF inference. Temporal window ends at end_date and defaults to the latest 3 months (set months=6 when needed for sparse clear observations). Returns 'solar_pv' (binary) and 'solar_pv_probability' (float).",
   "default_job_options": {
     "udf-dependency-archives": [
       "https://s3.waw3-1.cloudferro.com/project_dependencies/onnx_deps_python311.zip#onnx_deps",
@@ -186,15 +217,20 @@
       }
     },
     {
-      "name": "temporal_extent",
-      "description": "Date range [start, end] (ISO-8601).",
+      "name": "end_date",
+      "description": "End date (YYYY-MM-DD).",
       "schema": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "minItems": 2,
-        "maxItems": 2
+        "type": "string",
+        "format": "date"
+      }
+    },
+    {
+      "name": "months",
+      "description": "Months before end_date to include in the mosaic window.",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 3
       }
     }
   ]

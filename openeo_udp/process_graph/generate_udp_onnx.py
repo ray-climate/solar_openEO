@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import openeo
 from openeo.api.process import Parameter
+from openeo.processes import date_shift, multiply
 from openeo.rest.udp import build_process_dict
 
 from openeo_udp.process_graph.solar_pv_detection_onnx import (
@@ -37,16 +38,29 @@ spatial_extent = Parameter(
     description="Bounding box dict with west/south/east/north.",
     schema={"type": "object"},
 )
-temporal_extent = Parameter(
-    name="temporal_extent",
-    description="Date range [start, end] (ISO-8601).",
-    schema={"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+end_date = Parameter(
+    name="end_date",
+    description="End date (YYYY-MM-DD).",
+    schema={"type": "string", "format": "date"},
+)
+months = Parameter(
+    name="months",
+    description="Months before end_date to include in the mosaic window.",
+    schema={"type": "integer", "minimum": 1, "default": 3},
+)
+
+# Build temporal window directly in the process graph:
+# start = date_shift(end_date, -months, "month"), end = end_date.
+window_start = date_shift(
+    date=end_date,
+    value=multiply(x=months, y=-1),
+    unit="month",
 )
 
 cube = build_solar_pv_detection_onnx(
     connection=conn,
     spatial_extent=spatial_extent,
-    temporal_extent=temporal_extent,
+    temporal_extent=[window_start, end_date],
 )
 
 udp = build_process_dict(
@@ -55,9 +69,11 @@ udp = build_process_dict(
     summary="Solar PV detection (ONNX)",
     description=(
         "Sentinel-2 L1C temporal mosaic + ONNX UDF inference. "
+        "Temporal window ends at end_date and defaults to the latest 3 months "
+        "(set months=6 when needed for sparse clear observations). "
         "Returns 'solar_pv' (binary) and 'solar_pv_probability' (float)."
     ),
-    parameters=[spatial_extent, temporal_extent],
+    parameters=[spatial_extent, end_date, months],
     default_job_options=DEFAULT_JOB_OPTIONS,
 )
 

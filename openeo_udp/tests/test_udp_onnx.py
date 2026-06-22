@@ -30,7 +30,8 @@ AOI = {
   "north": 35.45,
   "crs": "EPSG:4326"
 }
-TEMPORAL = ["2024-05-01", "2024-11-30"]
+END_DATE = "2024-11-30"
+MONTHS = 6
 # ---------------------------------------------------------------------------
 
 if not UDP_JSON.exists():
@@ -45,10 +46,10 @@ cube = conn.datacube_from_json(
     str(UDP_JSON),
     parameters={
         "spatial_extent": AOI,
-        "temporal_extent": TEMPORAL,
+        "end_date": END_DATE,
+        "months": MONTHS,
     },
 )
-
 
 job = cube.create_job(
     title="solar_pv_detection_onnx_test_mosaic",
