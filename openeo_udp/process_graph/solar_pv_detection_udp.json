@@ -1,26 +1,5 @@
 {
   "process_graph": {
-    "multiply1": {
-      "process_id": "multiply",
-      "arguments": {
-        "x": {
-          "from_parameter": "months"
-        },
-        "y": -1
-      }
-    },
-    "dateshift1": {
-      "process_id": "date_shift",
-      "arguments": {
-        "date": {
-          "from_parameter": "end_date"
-        },
-        "unit": "month",
-        "value": {
-          "from_node": "multiply1"
-        }
-      }
-    },
     "loadcollection1": {
       "process_id": "load_collection",
       "arguments": {
@@ -59,14 +38,9 @@
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
-        "temporal_extent": [
-          {
-            "from_node": "dateshift1"
-          },
-          {
-            "from_parameter": "end_date"
-          }
-        ]
+        "temporal_extent": {
+          "from_parameter": "temporal_extent"
+        }
       }
     },
     "resamplespatial1": {
@@ -107,14 +81,9 @@
         "spatial_extent": {
           "from_parameter": "spatial_extent"
         },
-        "temporal_extent": [
-          {
-            "from_node": "dateshift1"
-          },
-          {
-            "from_parameter": "end_date"
-          }
-        ]
+        "temporal_extent": {
+          "from_parameter": "temporal_extent"
+        }
       }
     },
     "resamplespatial2": {
@@ -197,7 +166,7 @@
   },
   "id": "solar_pv_detection",
   "summary": "Solar PV detection (ONNX)",
-  "description": "Sentinel-2 L1C temporal mosaic + ONNX UDF inference. Temporal window ends at end_date and defaults to the latest 3 months (set months=6 when needed for sparse clear observations). Returns 'solar_pv' (binary) and 'solar_pv_probability' (float).",
+  "description": "Mapping solar photovoltaic (PV) installations from space is a key input for renewable-energy monitoring, grid planning and climate policy. This service detects ground-mounted and rooftop solar PV panels from Sentinel-2 L1C imagery using a deep-learning segmentation model deployed through an openEO User-Defined Process (UDP).",
   "default_job_options": {
     "udf-dependency-archives": [
       "https://s3.waw3-1.cloudferro.com/project_dependencies/onnx_deps_python311.zip#onnx_deps",
@@ -211,26 +180,79 @@
   "parameters": [
     {
       "name": "spatial_extent",
-      "description": "Bounding box dict with west/south/east/north.",
+      "description": "Spatial extent specified as a bounding box with 'west', 'south', 'east' and 'north' fields.",
       "schema": {
-        "type": "object"
+        "type": "object",
+        "subtype": "bounding-box",
+        "required": [
+          "west",
+          "south",
+          "east",
+          "north"
+        ],
+        "properties": {
+          "west": {
+            "type": "number",
+            "description": "West (lower left corner, coordinate axis 1)."
+          },
+          "south": {
+            "type": "number",
+            "description": "South (lower left corner, coordinate axis 2)."
+          },
+          "east": {
+            "type": "number",
+            "description": "East (upper right corner, coordinate axis 1)."
+          },
+          "north": {
+            "type": "number",
+            "description": "North (upper right corner, coordinate axis 2)."
+          },
+          "crs": {
+            "description": "Coordinate reference system of the extent, specified as as [EPSG code](http://www.epsg-registry.org/) or [WKT2 CRS string](http://docs.opengeospatial.org/is/18-010r7/18-010r7.html). Defaults to `4326` (EPSG code 4326) unless the client explicitly requests a different coordinate reference system.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "subtype": "epsg-code",
+                "title": "EPSG Code",
+                "minimum": 1000
+              },
+              {
+                "type": "string",
+                "subtype": "wkt2-definition",
+                "title": "WKT2 definition"
+              }
+            ],
+            "default": 4326
+          }
+        }
       }
     },
     {
-      "name": "end_date",
-      "description": "End date (YYYY-MM-DD).",
+      "name": "temporal_extent",
+      "description": "Temporal extent specified as two-element array with start and end date/date-time.",
       "schema": {
-        "type": "string",
-        "format": "date"
-      }
-    },
-    {
-      "name": "months",
-      "description": "Months before end_date to include in the mosaic window.",
-      "schema": {
-        "type": "integer",
-        "minimum": 1,
-        "default": 3
+        "type": "array",
+        "subtype": "temporal-interval",
+        "uniqueItems": true,
+        "minItems": 2,
+        "maxItems": 2,
+        "items": {
+          "anyOf": [
+            {
+              "type": "string",
+              "subtype": "date-time",
+              "format": "date-time"
+            },
+            {
+              "type": "string",
+              "subtype": "date",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       }
     }
   ]

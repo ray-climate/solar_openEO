@@ -30,8 +30,9 @@ AOI = {
   "north": 35.45,
   "crs": "EPSG:4326"
 }
-END_DATE = "2024-11-30"
-MONTHS = 6
+# Use a 3-month window during summer / clear-sky seasons.
+# Use a 6-month window during winter / persistently cloudy regions.
+TEMPORAL_EXTENT = ["2024-06-01", "2024-11-30"]
 # ---------------------------------------------------------------------------
 
 if not UDP_JSON.exists():
@@ -46,8 +47,7 @@ cube = conn.datacube_from_json(
     str(UDP_JSON),
     parameters={
         "spatial_extent": AOI,
-        "end_date": END_DATE,
-        "months": MONTHS,
+        "temporal_extent": TEMPORAL_EXTENT,
     },
 )
 
