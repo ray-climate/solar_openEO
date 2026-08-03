@@ -176,6 +176,13 @@ pg = result.to_json()
 with open("openeo_udp/process_graph/solar_pv_detection.json", "w") as f:
     json.dump(pg, f, indent=2)
 ```
+> You can also regenerate the openEO UDP description by executing the `generate_udp_onnx.py` script
+
+#### 5a. Managing the UDP description
+
+The UDP description is defined in the `udp_description.md` file. 
+The description supports markdown formatting and enables you to create a comprehensive description of the UDP.
+Once changed, it is important to re-export the process graph to ensure the description is updated in the resulting JSON.
 
 ### 6. Register the UDP
 

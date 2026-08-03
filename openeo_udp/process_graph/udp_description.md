@@ -1,0 +1,3 @@
+Mapping solar photovoltaic (PV) installations from space is a key input for renewable-energy monitoring, grid planning and climate policy. This service detects ground-mounted and rooftop solar PV panels from Sentinel-2 L1C imagery using a deep-learning segmentation model deployed through an openEO User-Defined Process (UDP).
+
+This algorithm was used to support the detection and mapping of global solar PV installations operational through early 2024. For further details, see Song et al. (2026), 'Coal plants persist as a large barrier to the global solar energy transition', published in Nature Sustainability: [https://www.nature.com/articles/s41893-026-01836-5](https://www.nature.com/articles/s41893-026-01836-5).

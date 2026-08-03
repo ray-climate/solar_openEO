@@ -25,11 +25,7 @@ import openeo
 def register_udp(
     connection: openeo.Connection,
     process_id: str = "solar_pv_detection",
-    description: str = (
-        "Detect solar PV panels from Sentinel-2 imagery using a U-Net model. "
-        "Builds a cloud-free temporal mosaic and runs pixel-level binary "
-        "segmentation.  Returns a mask where 1 = solar panel."
-    ),
+    description: str = (Path(__file__).resolve().parent / "udp_description.md").read_text(encoding="utf-8")
 ):
     """Register the UDP on the connected backend.
 
