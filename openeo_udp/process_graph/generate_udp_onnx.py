@@ -41,13 +41,13 @@ cube = build_solar_pv_detection_onnx(
     temporal_extent=temporal_extent,
 )
 
+description = (Path(__file__).resolve().parent / "udp_description.md").read_text(encoding="utf-8")
+
 udp = build_process_dict(
     process_graph=cube,
     process_id=PROCESS_ID,
     summary="Solar PV detection (ONNX)",
-    description=(
-        "Mapping solar photovoltaic (PV) installations from space is a key input for renewable-energy monitoring, grid planning and climate policy. This service detects ground-mounted and rooftop solar PV panels from Sentinel-2 L1C imagery using a deep-learning segmentation model deployed through an openEO User-Defined Process (UDP)."
-    ),
+    description=description,
     parameters=[spatial_extent, temporal_extent],
     default_job_options=DEFAULT_JOB_OPTIONS,
 )
